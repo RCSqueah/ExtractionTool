@@ -2,56 +2,48 @@
 
 A browser tool that turns client expense documents (expense templates `.xlsx`, Outlook `.msg` emails, chambers bill PDFs/scans, bank statement CSVs, or pasted email text) into a Xero-ready CSV (Bills or Bank Statement format).
 
-Features include a per-client chart of accounts learned from a Xero export, remembered coding history shared across the team, a use-of-home calculator, business-use % adjustments, row merging, and supplier VAT overrides.
+Features include a per-client chart of accounts learned from a Xero export, remembered coding history, a use-of-home calculator, business-use % adjustments, row merging, and supplier VAT overrides.
 
-## How it's built
+## How it works
 
-It runs on **Cloudflare Pages** (the free tier is enough for a small team):
+It is a single web page with no server, hosted free on **GitHub Pages**. It's built for **one user**:
 
-| Piece | File | What it does |
-|---|---|---|
-| The page | `public/index.html` | The tool itself |
-| Runtime shim | `public/runtime.js` | Connects the page to the server below (the page was originally a Claude artifact) |
-| AI | `functions/api/ai.js` | Sends documents to Claude using **your** Anthropic API key, kept on the server |
-| Storage | `functions/api/db/[[path]].js` | Saves the client list, charts of accounts, coding history and notes in Cloudflare KV |
-| Login | `functions/_middleware.js` | Password-protects the whole site |
+- **AI**: the page sends documents straight from your browser to Claude, using **your own Anthropic API key**. You enter the key once in **⚙ Settings**, and it's stored only in that browser.
+- **Model**: also set in **⚙ Settings**, defaulting to `claude-opus-5`. If a model is retired, the tool tells you, and you type the new model's name there. No code change is needed.
+- **Client data**: client lists, charts of accounts, coding history and notes are saved in your browser. Use **⚙ Settings → Back up client data** now and then, because clearing browser data deletes them. **Restore from backup** brings them back, or moves them to another computer or browser.
 
-### Settings
-
-In the Cloudflare dashboard, open your project and go to **Settings → Variables and Secrets**:
-
-| Name | Required | Purpose |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes, as a **Secret** | Your key from console.anthropic.com |
-| `APP_PASSWORD` | Yes, as a **Secret** | The team password. The site stays locked until this is set |
-| `CLAUDE_MODEL` | No | Which Claude model to use. Defaults to `claude-opus-5`. **When a model is retired, change this value. No code change is needed.** |
+| File | What it does |
+|---|---|
+| `docs/index.html` | The tool itself |
+| `docs/runtime.js` | Connects the page to Claude and browser storage, plus the Settings panel (the page was originally a Claude artifact) |
+| `docs/vendor/anthropic-sdk-*.js` | A bundled copy of Anthropic's official JavaScript SDK |
 
 ## One-time setup
 
-1. **Anthropic API key**: sign in at <https://console.anthropic.com>, add billing, then go to **API Keys → Create Key**. Copy the key.
-2. **Cloudflare account**: sign up for free at <https://dash.cloudflare.com>.
-3. **Create the storage**: go to **Storage & Databases → KV → Create** and name it `expense-parser-db`.
-4. **Create the site**: go to **Workers & Pages → Create → Pages → Connect to Git**, pick `RCSqueah/ExtractionTool`, then set:
-   - Production branch: `main`
-   - Build command: `npm install`
-   - Build output directory: `public`
-5. **Add the settings**: in the new project, open **Settings → Variables and Secrets**. Add `ANTHROPIC_API_KEY` and `APP_PASSWORD` as secrets, plus `CLAUDE_MODEL` if you want a model other than the default.
-6. **Connect the storage**: go to **Settings → Bindings → Add → KV namespace**. Set the variable name to `EXPENSES_DB` and pick `expense-parser-db`.
-7. **Redeploy**: go to **Deployments** and choose **⋯ → Retry deployment** on the latest one so the settings take effect.
-8. **Open the site**: go to the `*.pages.dev` address Cloudflare gives you. Sign in with any username and the `APP_PASSWORD`.
+1. **Get an Anthropic API key**: sign in at <https://console.anthropic.com>, add billing, then go to **API Keys → Create Key**. Copy the key.
+2. **Turn on GitHub Pages**: in this repo on GitHub, go to **Settings → Pages**. Under **Build and deployment**, set Source to **Deploy from a branch**, Branch to **`main`**, and Folder to **`/docs`**. Click **Save**.
+3. **Open the site**: after a minute or two, the Pages settings show your address, for example `https://rcsqueah.github.io/ExtractionTool/`. Open it.
+4. **Add your key**: click **⚙ SETTINGS** at the top right, paste the key, and click **Save**.
 
-After this, every push to `main` redeploys automatically.
-
-## Running locally (optional, for developers)
-
-```bash
-npm install
-printf 'APP_PASSWORD=devpw\nANTHROPIC_API_KEY=sk-ant-...\n' > .dev.vars
-npm run dev    # http://localhost:8788
-```
+After this, every change merged into `main` goes live automatically.
 
 ## Notes
 
-- **Cost**: you pay Anthropic per request. A typical document or email costs a few pence on the default model. You can set a cheaper model, such as `claude-sonnet-5`, in `CLAUDE_MODEL`.
-- **Storage**: each save overwrites the whole client record. If two people change the same client's history at the same moment, the later save wins, as in the original artifact.
+- **Privacy**: documents go directly from your browser to Anthropic and nowhere else. Your key is never in the code or on GitHub. Anyone else who opens the site won't have a key, so they can't use your credit or see your data.
+- **Cost**: you pay Anthropic per request. A typical document or email costs a few pence on the default model. A cheaper model, such as `claude-sonnet-5`, can be set in Settings.
+- **Private repositories**: GitHub Pages on a private repo needs a paid GitHub plan. The site itself holds no client data or keys, so a public repo is fine.
 - **Live Xero lookup** ("Check Xero history") is still disabled. Uploading a Xero export file in Step 1 does the same job.
+- **Moving to a team setup later**: a shared version needs a server for the API key and a shared database. An earlier revision of pull request #1 has a Cloudflare version to start from.
+
+## Updating the SDK (developers)
+
+The SDK is bundled so the site doesn't depend on a third-party CDN. To update it:
+
+```bash
+npm i @anthropic-ai/sdk@<version> esbuild
+echo "export { default } from '@anthropic-ai/sdk';" > entry.js
+npx esbuild entry.js --bundle --format=esm --minify --platform=browser --legal-comments=eof \
+  --outfile=docs/vendor/anthropic-sdk-<version>.js
+```
+
+Then update `SDK_URL` in `docs/runtime.js` and delete the old file.
