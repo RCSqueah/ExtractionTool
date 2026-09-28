@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Expense Parser — Xero Export</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="runtime.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
@@ -582,8 +583,39 @@
 
 <header>
   <h1>⬡ EXPENSE PARSER</h1>
-  <span>EXPENSES → XERO CSV</span>
+  <div style="display:flex;align-items:center;gap:14px;">
+    <span>EXPENSES → XERO CSV</span>
+    <button type="button" id="settingsToggle" onclick="toggleSettingsPanel()" style="background:transparent;color:#fff;border:1px solid #555;border-radius:6px;padding:5px 12px;font-family:'IBM Plex Mono',monospace;font-size:11px;cursor:pointer;">⚙ SETTINGS</button>
+  </div>
 </header>
+
+<!-- SETTINGS (API key, model, backup) — see runtime.js -->
+<div id="settingsPanel" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);">
+  <div style="max-width:1400px;margin:0 auto;padding:20px 24px;display:grid;grid-template-columns:2fr 1fr auto;gap:16px;align-items:end;">
+    <div class="field">
+      <label>Anthropic API key</label>
+      <input type="password" id="settingsApiKey" placeholder="sk-ant-…" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>Claude model</label>
+      <input type="text" id="settingsModel" placeholder="claude-opus-5">
+    </div>
+    <button class="btn btn-primary" type="button" onclick="saveSettingsPanel()">Save</button>
+  </div>
+  <div style="max-width:1400px;margin:0 auto;padding:0 24px 20px;">
+    <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">
+      Both are stored only in this browser. Get a key at console.anthropic.com → API Keys. If Claude says a model has been retired, put the new model's name here.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn" type="button" onclick="downloadBackup()">↓ Back up client data</button>
+      <label class="btn" style="cursor:pointer;">↑ Restore from backup<input type="file" accept=".json" onchange="restoreBackup(this.files[0]); this.value='';" style="display:none;"></label>
+      <span id="settingsStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+    <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+      Client lists, charts of accounts and coding history are saved in this browser only. Clearing browser data deletes them, so back up now and then, and restore the backup to use another computer or browser.
+    </div>
+  </div>
+</div>
 
 <div class="main">
 
@@ -2391,24 +2423,13 @@ async function callChambersExtraction(file, kind) {
   const { sample } = await getCaps();
   if (!sample) throw new Error('Asking Claude is not available in this view.');
 
-  if (kind === 'pdf') {
-    // The published-page `sample` capability can send images to Claude but
-    // not PDF documents (that raw-API "document" content block has no
-    // equivalent here) — ask for an image instead rather than silently
-    // failing or guessing at an unsupported shape.
-    throw new Error('PDF extraction isn\'t available in the published version of this tool — please export/screenshot the page(s) as PNG or JPG and upload that instead, or use "Process Xero export" / paste it into the email box.');
-  }
-  if (kind !== 'image') throw new Error('Unsupported file type — use PNG or JPG');
+  if (kind !== 'pdf' && kind !== 'image') throw new Error('Unsupported file type — use PDF, PNG or JPG');
 
-  const limits = await sample.limits().catch(() => null);
-  if (!limits || !limits.images) {
-    throw new Error('This view cannot send images to Claude.');
-  }
-
-  const prompt = `${buildChambersExtractionSystemPrompt()}\n\nThe attached image is the source document "${file.name}". Extract every chargeable expense line item per the instructions, and respond with ONLY the JSON array.`;
+  const prompt = `${buildChambersExtractionSystemPrompt()}\n\nThe attached ${kind === 'pdf' ? 'PDF' : 'image'} is the source document "${file.name}". Extract every chargeable expense line item per the instructions, and respond with ONLY the JSON array.`;
   let parsed;
   try {
-    parsed = await sample.json(prompt, { images: file, modelTier: 'default', cache: false });
+    const attachment = kind === 'pdf' ? { documents: file } : { images: file };
+    parsed = await sample.json(prompt, { ...attachment, modelTier: 'default', cache: false });
   } catch (e) {
     if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
     if (e && e.code === 'images_unavailable') throw new Error('This view cannot send images to Claude.');
