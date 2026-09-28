@@ -1,0 +1,3661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expense Parser — Xero Export</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg: #f5f4f0;
+    --surface: #ffffff;
+    --surface2: #f0efe9;
+    --border: #dddbd2;
+    --border-strong: #b8b5a8;
+    --text: #1a1916;
+    --text-muted: #6b6860;
+    --text-faint: #9c9a93;
+    --accent: #1a1916;
+    --accent-light: #e8e7e1;
+    --green: #1a6b3a;
+    --green-bg: #e8f5ed;
+    --red: #8b2020;
+    --red-bg: #faecec;
+    --amber: #7a4f00;
+    --amber-bg: #fdf3e0;
+    --blue: #1a3d6b;
+    --blue-bg: #e8eefc;
+    --radius: 6px;
+    --radius-lg: 10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'IBM Plex Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--text);
+    color: #fff;
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 2px solid #000;
+  }
+
+  header h1 {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+
+  header span {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: #aaa;
+    letter-spacing: 0.06em;
+  }
+
+  .main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 28px 24px 60px;
+  }
+
+  /* ── DROP ZONE ── */
+  .drop-zone {
+    border: 2px dashed var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    padding: 52px 40px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--text);
+    background: var(--accent-light);
+  }
+  .drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .drop-icon {
+    font-size: 32px;
+    margin-bottom: 12px;
+    color: var(--text-muted);
+  }
+  .drop-zone h2 {
+    font-size: 16px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .drop-zone p {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  /* ── SETTINGS STRIP ── */
+  .settings-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px 24px;
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 16px;
+    align-items: end;
+    margin-bottom: 16px;
+  }
+
+  .field label {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+  }
+  .field input, .field select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    transition: border-color 0.15s;
+  }
+  .field input:focus, .field select:focus {
+    outline: none;
+    border-color: var(--text);
+    background: #fff;
+  }
+
+  /* ── HOME CALC ── */
+  .home-calc-bar {
+    background: var(--blue-bg);
+    border: 1px solid #b0c4f0;
+    border-radius: var(--radius-lg);
+    padding: 16px 24px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .home-calc-bar.visible { display: block; }
+  .home-calc-bar .hc-title {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--blue);
+    margin-bottom: 12px;
+  }
+  .hc-method-btn {
+    padding: 5px 14px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid #b0c4f0;
+    background: transparent;
+    color: var(--blue);
+    transition: all 0.15s;
+    font-family: 'IBM Plex Sans', sans-serif;
+  }
+  .hc-method-btn.active {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+  }
+  .home-calc-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+  }
+  .home-calc-grid .field label { color: var(--blue); }
+  .home-calc-grid .field input, .home-calc-grid .field select {
+    background: #f0f5fe;
+    border-color: #b0c4f0;
+  }
+  .home-result {
+    padding: 8px 14px;
+    background: var(--blue);
+    color: #fff;
+    border-radius: var(--radius);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 18px;
+    font-weight: 500;
+    white-space: nowrap;
+    text-align: center;
+    min-width: 90px;
+  }
+  .home-result small {
+    display: block;
+    font-size: 10px;
+    opacity: 0.8;
+    font-family: 'IBM Plex Sans', sans-serif;
+    margin-bottom: 2px;
+  }
+
+  /* ── TABLE AREA ── */
+  .table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .table-header h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+  .row-count {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: auto;
+    margin-bottom: 20px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th.sortable {
+    cursor: pointer;
+    user-select: none;
+  }
+  thead th.sortable:hover { background: #2a2a27; }
+  thead th.sort-asc, thead th.sort-desc { background: #2a2a27; }
+  .sort-ind { font-size: 9px; opacity: 0.6; margin-left: 3px; }
+  thead th {
+    background: var(--text);
+    color: #fff;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 10px;
+    text-align: left;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody tr.needs-attention td:nth-child(2) select,
+  tbody tr.needs-attention td:nth-child(3) select {
+    border-color: #f0a0a0;
+    background: var(--red-bg);
+  }
+  tbody tr.excluded td { text-decoration: line-through; }
+  tbody tr.excluded td.no-strike { text-decoration: none; }
+
+  tbody td {
+    padding: 7px 10px;
+    vertical-align: middle;
+  }
+
+  tbody td input[type=text],
+  tbody td input[type=number],
+  tbody td input[type=date],
+  tbody td select {
+    width: 100%;
+    padding: 5px 7px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12px;
+    background: transparent;
+    color: var(--text);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  tbody td input:hover, tbody td select:hover {
+    border-color: var(--border);
+    background: var(--bg);
+  }
+  tbody td input:focus, tbody td select:focus {
+    outline: none;
+    border-color: var(--text);
+    background: #fff;
+  }
+
+  .toggle-post {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    border: none;
+    transition: background 0.2s, color 0.2s;
+    user-select: none;
+  }
+  .toggle-post.yes { background: var(--green-bg); color: var(--green); }
+  .toggle-post.no  { background: var(--red-bg);   color: var(--red); }
+
+  .bu-cell {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .bu-cell input {
+    width: 58px !important;
+  }
+  .bu-cell .bu-suffix {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .use-home-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .use-home-btn.active {
+    background: var(--blue-bg);
+    border-color: #b0c4f0;
+    color: var(--blue);
+  }
+  .use-home-btn.unadjusted {
+    background: var(--amber-bg);
+    border-color: #e8c97a;
+    color: var(--amber);
+  }
+
+  .net-amt {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .net-amt.adjusted { color: var(--green); font-weight: 500; }
+
+  .del-row {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 4px;
+    line-height: 1;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .del-row:hover { color: var(--red); background: var(--red-bg); }
+
+  /* ── SUMMARY FOOTER ── */
+  .summary-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px 20px;
+  }
+  .stat-card .stat-label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .stat-card .stat-val {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 22px;
+    font-weight: 500;
+  }
+
+  /* ── EXPORT BUTTONS ── */
+  .export-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 22px;
+    border-radius: var(--radius);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+  }
+  .btn:hover { background: var(--surface2); border-color: var(--border-strong); }
+
+  .btn-primary {
+    background: var(--text);
+    color: #fff;
+    border-color: var(--text);
+  }
+  .btn-primary:hover { opacity: 0.85; }
+  .btn-primary:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .btn-add {
+    background: var(--green-bg);
+    color: var(--green);
+    border-color: #a8d5b8;
+  }
+  .btn-add:hover { background: #d4eddd; }
+
+  /* ── ALERT ── */
+  .alert {
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .alert.show { display: block; }
+  .alert-info { background: var(--blue-bg); color: var(--blue); border: 1px solid #b0c4f0; }
+  .alert-success { background: var(--green-bg); color: var(--green); border: 1px solid #a8d5b8; }
+  .alert-warn { background: var(--amber-bg); color: var(--amber); border: 1px solid #e8c97a; }
+
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--text-faint);
+    font-size: 13px;
+  }
+  .empty-state p { margin-top: 8px; }
+
+  /* ── MISC ── */
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .text-right { text-align: right; }
+  hr.divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+  /* ── EMAIL PASTE ── */
+  .email-paste-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 18px 24px;
+    margin-top: 12px;
+  }
+  .email-paste-title {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .email-paste-bar textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    resize: vertical;
+    line-height: 1.6;
+  }
+  .email-paste-bar textarea:focus {
+    outline: none;
+    border-color: var(--text);
+    background: #fff;
+  }
+
+  /* ── UNIFIED UPLOAD ── */
+  .table-footer-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin: -10px 0 20px;
+  }
+
+  /* ── RAW DOCUMENT AI EXTRACTION ── */
+  .raw-file-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface2);
+    font-size: 12px;
+  }
+  .raw-file-item .fname { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .raw-file-item .fstatus { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 3px 8px; border-radius: 10px; text-transform: uppercase; flex-shrink: 0; }
+  .raw-file-item .fstatus.queued { background: #eee; color: #77726a; }
+  .raw-file-item .fstatus.working { background: var(--amber-bg); color: var(--amber); }
+  .raw-file-item .fstatus.done { background: var(--green-bg); color: var(--green); }
+  .raw-file-item .fstatus.failed { background: var(--red-bg); color: var(--red); }
+  .raw-file-item .fstatus.duplicate { background: var(--amber-bg); color: var(--amber); }
+  .raw-file-item { flex-wrap: wrap; }
+  .raw-file-item .dup-note { flex-basis: 100%; font-size: 10.5px; color: var(--amber); margin-top: 2px; }
+  .raw-file-item .include-anyway {
+    font-size: 10px; padding: 3px 9px; border-radius: 10px; flex-shrink: 0;
+    border: 1px solid var(--amber); background: transparent; color: var(--amber); cursor: pointer;
+  }
+  .raw-file-item .include-anyway:hover { background: var(--amber-bg); }
+  .raw-file-item .fremove { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 14px; flex-shrink: 0; }
+  .raw-file-item .fremove:hover { color: var(--red); }
+
+  /* ── EXPORT TYPE TOGGLE ── */
+  .export-type-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .export-type-toggle button {
+    padding: 9px 16px;
+    border: none;
+    background: var(--surface);
+    color: var(--text-muted);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    border-right: 1px solid var(--border);
+  }
+  .export-type-toggle button:last-child { border-right: none; }
+  .export-type-toggle button.active {
+    background: var(--text);
+    color: #fff;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⬡ EXPENSE PARSER</h1>
+  <span>EXPENSES → XERO CSV</span>
+</header>
+
+<div class="main">
+
+  <!-- ALERT -->
+  <div class="alert alert-info show" id="mainAlert">
+    Drop the client's completed expense template (.xlsx), a chambers bill, an email, or a raw bank statement export (.csv) below to begin. All data stays in your browser — nothing is uploaded.
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="settings-bar" style="grid-template-columns:2fr 1fr 1fr;">
+    <div class="field">
+      <label>Client (ContactName / Payee)</label>
+      <select id="clientName" onchange="onClientSelectChange()">
+        <option value="">— select a client —</option>
+        <option value="__new__">+ Add a new client…</option>
+      </select>
+      <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin-top:3px;">A dropdown keeps everyone's spelling consistent — coding history is remembered per client and shared with your whole team.</div>
+      <div id="newClientRow" style="display:none;margin-top:8px;display:flex;gap:6px;">
+        <input type="text" id="newClientInput" placeholder="New client's full name" style="flex:1;">
+        <button class="btn btn-primary" type="button" onclick="confirmAddNewClient()">Add</button>
+        <button class="btn" type="button" onclick="cancelAddNewClient()">Cancel</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Period end</label>
+      <input type="text" id="quarter" placeholder="e.g. September, or YE-31 March" oninput="refreshExportBtn()">
+    </div>
+    <div class="field">
+      <label>Year</label>
+      <input type="number" id="yearInput" placeholder="e.g. 2025" min="2000" max="2099" oninput="refreshExportBtn()">
+    </div>
+  </div>
+  <div class="field" id="customQuarterDateRow" style="margin:-10px 0 16px;max-width:220px;">
+    <label>Actual period-end date</label>
+    <input type="date" id="customQuarterDate" oninput="refreshExportBtn()">
+    <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin-top:3px;">Used as the fallback date for anything extracted without its own date.</div>
+  </div>
+
+  <div id="clientHistoryPanel"></div>
+
+  <!-- STEP 1: CHART OF ACCOUNTS -->
+  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin:4px 0 10px;">① CHART OF ACCOUNTS &amp; CODING HISTORY</h3>
+  <div class="email-paste-bar" id="coaBar" style="margin-top:0;">
+    <div class="email-paste-title">📊 Last year's Xero export</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+      Drop in an export of this client's last 12 months of transactions from Xero — e.g. an <em>Account Transactions</em> report, or a bills/purchases
+      export (.csv or .xlsx). Claude reads it once to build this client's own chart of accounts below, and to learn which account each recurring
+      supplier or expense type is normally coded to. This only needs doing once per client: it's saved and reloaded automatically whenever this
+      client is selected again, and dropping in a newer export later just adds anything new.
+    </p>
+    <div class="drop-zone" id="xeroExportDropZone" style="padding:30px;">
+      <input type="file" id="xeroExportFileInput" accept=".csv,.xlsx,.xls,.txt" multiple>
+      <div class="drop-icon" style="font-size:24px;margin-bottom:6px;">📊</div>
+      <div style="font-size:13px;">Click or drop last year's Xero export here (.csv or .xlsx)</div>
+    </div>
+    <div id="xeroExportFileList" style="margin-top:10px;display:flex;flex-direction:column;gap:6px;"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+      <button class="btn btn-primary" id="processXeroExportBtn" onclick="processXeroExportQueue()" disabled>Process Xero export</button>
+      <span id="xeroExportStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+
+    <div style="margin:16px 0 10px;border-top:1px solid var(--border);"></div>
+    <div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">Or, pull it live instead</div>
+    <div id="xeroCheckRow" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button class="btn" id="xeroCheckBtn" onclick="checkXeroHistory()" disabled>🔗 Check Xero history for this client</button>
+      <span id="xeroCheckStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+    <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin:6px 0 0;">Only one Xero organisation can be connected at a time (a current Claude limitation, not a setting here). If this isn't the right client's organisation, go to Settings → Connectors → Xero → Disconnect, then Reconnect and pick the correct one before checking. Either path — file or live lookup — builds the same chart of accounts below.</div>
+
+    <div style="margin:16px 0 10px;border-top:1px solid var(--border);"></div>
+    <div id="coaPanel"></div>
+  </div>
+
+  <!-- NEW JOB / CLEAR ALL -->
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:16px 0;">
+    <span id="rowCountTop" class="row-count" style="margin-right:4px;"></span>
+    <button class="btn" onclick="requestClearAll()">✕ Clear all — start new job</button>
+  </div>
+  <div id="clearConfirmBox" style="margin-bottom:16px;"></div>
+
+  <!-- STEP 2: ADD EXPENSES -->
+  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin-bottom:10px;">② Add Expenses</h3>
+
+  <!-- UNIFIED UPLOAD -->
+  <div class="email-paste-bar" id="uploadBar" style="margin-top:0;">
+    <div class="email-paste-title">📂 Add client documents</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+      Drop the client's expense template (.xlsx), an Outlook email (.msg), chambers bill PDFs/scans (PNG/JPG), or a raw bank statement
+      export (.csv) — any mix, any number. A bank statement CSV is read line-by-line and every transaction is added as a row: money out
+      is coded as an expense, money in and anything that looks personal (drawings, transfers to yourself, personal card repayments, HMRC
+      self-assessment, etc.) is added but excluded by default — <strong>always double-check these before exporting</strong>. Each file
+      <strong>adds</strong> to the rows below rather than clearing what's already there, so a client who sends a separate file
+      per month (e.g. three months of bank statements) can just have all of them dropped in together, or added one at a time as they arrive.
+      Use "Clear all" above if you want to start over completely.
+    </p>
+    <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
+      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv" multiple>
+      <div class="drop-icon" style="font-size:26px;margin-bottom:8px;">📎</div>
+      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, or bank statement CSVs</div>
+    </div>
+    <div id="unifiedFileList" style="margin-top:12px;display:flex;flex-direction:column;gap:8px;"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+      <span id="unifiedStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+  </div>
+
+  <!-- EMAIL PASTE -->
+  <div class="email-paste-bar" style="margin-top:12px;">
+    <div class="email-paste-title">✉ Paste email body</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">Paste the expense email text below. Claude will extract rows automatically — missing dates default to the quarter end.</p>
+    <textarea id="emailPasteBox" placeholder="Paste email content here…" rows="5" oninput="refreshProcessAllBtn()"></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+      <span id="emailStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+  </div>
+
+  <!-- EXTRA INSTRUCTIONS -->
+  <div class="email-paste-bar" style="margin-top:12px;">
+    <div class="email-paste-title">💬 Anything else Claude should know?</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+      Optional notes that apply whenever documents or emails above are read for this client — e.g. "motor expenses should be at 50% business use",
+      "ignore anything from the personal credit card", "this client's mobile bill is 80% business use". Saved per client.
+    </p>
+    <textarea id="extraInstructionsBox" placeholder="e.g. Motor expenses should be at 50% business use…" rows="3" oninput="scheduleSaveExtraInstructions()"></textarea>
+    <div style="display:flex;gap:8px;margin-top:14px;align-items:center;">
+      <button class="btn btn-primary" id="processAllBtn" onclick="processAll()">Process files &amp; email</button>
+      <span id="processAllStatus" style="font-size:12px;color:var(--text-muted);"></span>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- HOME OFFICE CALCULATOR -->
+  <div class="home-calc-bar" id="homeCalcBar">
+    <div class="hc-title">⌂ Use of home — business proportion</div>
+    <div style="display:flex;gap:6px;margin-bottom:14px;">
+      <button class="hc-method-btn active" id="btnPctMethod" onclick="setHomeMethod('pct')">% Method</button>
+      <button class="hc-method-btn" id="btnRoomsMethod" onclick="setHomeMethod('rooms')">Rooms Method</button>
+    </div>
+
+    <!-- % Method -->
+    <div id="hcPctInputs" class="home-calc-grid" style="grid-template-columns:1fr 1fr auto;">
+      <div class="field">
+        <label>Home use %</label>
+        <input type="number" id="hcHomePct" value="25" min="0" max="100" step="0.01" oninput="calcHome()">
+      </div>
+      <div class="field">
+        <label>Time %</label>
+        <input type="number" id="hcTimePctA" value="90" min="0" max="100" step="0.01" oninput="calcHome()">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <div class="home-result" id="homeResult">
+          <small>Effective %</small>
+          <span id="homePctDisplay">22.50</span>%
+        </div>
+      </div>
+    </div>
+
+    <!-- Rooms Method -->
+    <div id="hcRoomsInputs" class="home-calc-grid" style="grid-template-columns:1fr 1fr 1fr auto;display:none;">
+      <div class="field">
+        <label>Rooms used</label>
+        <input type="number" id="hcWorkRooms" value="1" min="1" oninput="calcHome()">
+      </div>
+      <div class="field">
+        <label>Total rooms</label>
+        <input type="number" id="hcRooms" value="4" min="1" oninput="calcHome()">
+      </div>
+      <div class="field">
+        <label>Time %</label>
+        <input type="number" id="hcTimePctB" value="90" min="0" max="100" step="0.01" oninput="calcHome()">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <div class="home-result" id="homeResultRooms">
+          <small>Effective %</small>
+          <span id="homePctDisplayRooms">22.50</span>%
+        </div>
+      </div>
+    </div>
+
+    <div id="hcEffectiveLine" style="margin-top:12px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--blue);padding:8px 12px;background:rgba(26,61,107,0.07);border-radius:4px;"></div>
+  </div>
+
+  <!-- TABLE -->
+  <div class="table-header">
+    <h3>EXPENSE ROWS</h3>
+    <span class="row-count" id="rowCount">0 rows</span>
+  </div>
+
+  <div class="table-wrap" id="tableWrap">
+    <div class="empty-state" id="emptyState">
+      <div style="font-size:28px">📋</div>
+      <p>No rows yet. Drop a file above or click <strong>+ Add row</strong> to start manually.</p>
+    </div>
+    <table id="expTable" style="display:none">
+      <thead>
+        <tr>
+          <th style="width:56px" data-col="merge">Merge</th>
+          <th style="min-width:170px" onclick="sortBy('acc')" class="sortable" data-col="acc">Account <span class="sort-ind" id="si-acc"></span></th>
+          <th style="min-width:150px" onclick="sortBy('vat')" class="sortable" data-col="vat">VAT Rate <span class="sort-ind" id="si-vat"></span></th>
+          <th style="min-width:70px" onclick="sortBy('ref')" class="sortable" data-col="ref">Ref <span class="sort-ind" id="si-ref"></span></th>
+          <th style="min-width:100px" onclick="sortBy('date')" class="sortable" data-col="date">Date <span class="sort-ind" id="si-date"></span></th>
+          <th style="min-width:110px" onclick="sortBy('supplier')" class="sortable" data-col="supplier">Supplier <span class="sort-ind" id="si-supplier"></span></th>
+          <th style="min-width:300px" onclick="sortBy('desc')" class="sortable" data-col="desc">Description <span class="sort-ind" id="si-desc"></span></th>
+          <th style="min-width:130px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
+          <th style="width:100px">% BU</th>
+          <th style="width:60px">Home</th>
+          <th style="width:100px" class="text-right" onclick="sortBy('net')" class="sortable" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
+          <th style="width:32px"></th>
+        </tr>
+      </thead>
+      <tbody id="expBody"></tbody>
+    </table>
+  </div>
+
+  <div class="table-footer-actions">
+    <button class="btn" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge selected rows</button>
+    <button class="btn btn-add" onclick="addBlankRow()">+ Add row</button>
+  </div>
+
+  <!-- SUMMARY -->
+  <div class="summary-bar" id="summaryBar" style="display:none">
+    <div class="stat-card">
+      <div class="stat-label">Rows to post</div>
+      <div class="stat-val" id="statPost">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Rows excluded</div>
+      <div class="stat-val" id="statExcl">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Gross total</div>
+      <div class="stat-val" id="statGross">£0.00</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">BU-adjusted total</div>
+      <div class="stat-val" id="statNet">£0.00</div>
+    </div>
+  </div>
+
+  <!-- EXPORT -->
+  <div class="export-bar">
+    <div class="export-type-toggle" id="exportTypeToggle">
+      <button class="active" id="btnExportBills" onclick="setExportType('bills')">Bills CSV</button>
+      <button id="btnExportBank" onclick="setExportType('bank')">Bank Statement CSV</button>
+    </div>
+    <button class="btn btn-primary" id="exportBtn" onclick="exportCSV()" disabled>
+      ↓ Download Xero CSV
+    </button>
+    <span id="exportNote" style="font-size:12px;color:var(--text-faint);margin-left:4px"></span>
+  </div>
+
+</div>
+
+<script>
+// ── DATA ──────────────────────────────────────────────────────────────────────
+
+// The chart of accounts and its VAT defaults are no longer fixed in code.
+// Each client has their own, learned from Step 1 (dropping in an export of
+// last year's Xero transactions) and/or the live "Check Xero history"
+// connector lookup further down — both paths feed the same mergeIntoCoa()
+// function. Whatever is learned is cached in shared storage per client name
+// (see loadClientCoa/saveClientCoa below), so it only has to be built once
+// per client and is reloaded automatically whenever that client is selected
+// again. Starts empty until a client is selected and Step 1 has run.
+let ACCOUNTS = [];
+let VAT_DEFAULTS = {};
+
+const VAT_RATES = [
+  '20% (VAT on Expenses)', '5% (VAT on Expenses)',
+  'Exempt Expenses', 'Zero Rated Expenses', 'No VAT',
+];
+
+let rows = [];
+let nextId = 0;
+let exportType = 'bills'; // 'bills' or 'bank'
+
+// Suppliers that are always Zero Rated for VAT regardless of account chosen —
+// per firm convention (TfL, Trainline, and Uber fares are zero-rated passenger
+// transport). Applied whenever the supplier field is set or edited, on any
+// row-creation path (manual entry, template import, email/AI extraction).
+const SUPPLIER_VAT_OVERRIDES = [
+  { match: /\btfl\b|transport for london/i, vat: 'Zero Rated Expenses' },
+  { match: /\btrainline\b/i, vat: 'Zero Rated Expenses' },
+  { match: /\buber\b/i, vat: 'Zero Rated Expenses' },
+];
+function supplierVatOverride(supplier) {
+  const s = (supplier || '').trim();
+  if (!s) return null;
+  const hit = SUPPLIER_VAT_OVERRIDES.find(o => o.match.test(s));
+  return hit ? hit.vat : null;
+}
+
+// ── SHARED PER-CLIENT MEMORY ─────────────────────────────────────────────────
+// Remembers how each client's expenses have actually been coded before —
+// keyed by client name, stored in SHARED artifact storage so the whole team
+// sees the same history, not just whoever happened to code it last. This is
+// separate from the firm-wide account defaults (VAT_DEFAULTS): those are
+// general UK VAT rules, this is "how THIS client's stuff specifically gets
+// coded" — e.g. a subscription that's usually Zero Rated for one client but
+// genuinely 20% for another because of who the actual supplier is.
+//
+// Rules are looked up per row by supplier name (falling back to the
+// description if no supplier is given), since supplier is the more stable
+// identifier for recurring costs. The whole ruleset for a client is small,
+// so it's read/held in memory (`currentClientRules`) once the name field is
+// set, then written back in full on every update — no partial-merge needed.
+
+let currentClientKey = '';
+let currentClientRules = {};
+
+// ── CLAUDE RUNTIME CAPABILITIES (db + sample) ───────────────────────────────
+// Published Artifact pages don't have window.storage or a raw fetch() to
+// api.anthropic.com — those only work in the in-chat preview. The published
+// runtime exposes the same abilities as "capabilities": claude.use('db') for
+// shared persistent storage, claude.use('sample') to ask Claude something.
+// Resolved once and memoized (claude.use() itself is cheap to re-await, but
+// this avoids re-checking window.claude everywhere).
+let _capsPromise = null;
+function getCaps() {
+  if (!_capsPromise) {
+    _capsPromise = (async () => {
+      const canUse = typeof window.claude !== 'undefined' && typeof window.claude.use === 'function';
+      const db = canUse ? await window.claude.use('db').catch(() => null) : null;
+      const sample = canUse ? await window.claude.use('sample').catch(() => null) : null;
+      return { db, sample };
+    })();
+  }
+  return _capsPromise;
+}
+
+// One document per client holds everything the team has learned about them —
+// coding history (currentClientRules), chart of accounts (ACCOUNTS/
+// VAT_DEFAULTS), and free-text extra instructions — so a single client
+// selection does one read and one write instead of three.
+function clientDocPath(name) {
+  return 'clients/' + name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
+
+async function loadClientRules() {
+  const name = document.getElementById('clientName').value.trim();
+  currentClientKey = name;
+  currentClientRules = {};
+  ACCOUNTS = [];
+  VAT_DEFAULTS = {};
+  currentExtraInstructions = '';
+
+  if (name) {
+    const { db } = await getCaps();
+    if (db) {
+      try {
+        const snap = await db.doc(clientDocPath(name)).get();
+        if (snap.exists) {
+          const data = snap.data() || {};
+          if (data.rules && typeof data.rules === 'object') currentClientRules = data.rules;
+          if (data.coa && Array.isArray(data.coa.accounts)) ACCOUNTS = data.coa.accounts;
+          if (data.coa && data.coa.vatDefaults && typeof data.coa.vatDefaults === 'object') VAT_DEFAULTS = data.coa.vatDefaults;
+          if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
+        }
+      } catch (e) {
+        // No history yet for this client — that's fine, starts empty.
+      }
+    }
+  }
+
+  const xeroBtn = document.getElementById('xeroCheckBtn');
+  if (xeroBtn) xeroBtn.disabled = !currentClientKey;
+  document.getElementById('xeroCheckStatus').textContent = '';
+  const box = document.getElementById('extraInstructionsBox');
+  if (box) box.value = currentExtraInstructions;
+  renderClientHistoryPanel();
+  renderCoaPanel();
+  refreshAllRows();
+}
+
+// Writes the whole client document in one go (rules + chart of accounts +
+// notes). Called directly (and awaited) after a batch operation like
+// processing a Xero export, and via the debounced scheduleSaveClientDoc()
+// for interactive single-item edits so rapid changes don't each fire a
+// separate write.
+async function saveClientDoc() {
+  if (!currentClientKey) return;
+  const { db } = await getCaps();
+  if (!db) return;
+  try {
+    await db.doc(clientDocPath(currentClientKey)).set({
+      name: currentClientKey,
+      rules: currentClientRules,
+      coa: { accounts: ACCOUNTS, vatDefaults: VAT_DEFAULTS },
+      notes: currentExtraInstructions,
+    });
+  } catch (e) {
+    console.error('Could not save client data:', e);
+  }
+}
+
+let clientDocSaveTimer = null;
+function scheduleSaveClientDoc() {
+  clearTimeout(clientDocSaveTimer);
+  clientDocSaveTimer = setTimeout(() => { saveClientDoc(); }, 500);
+}
+
+// Adds newly-learned accounts/VAT defaults on top of whatever's already
+// there rather than replacing it — running Step 1 again with a later export,
+// or using the live Xero lookup after Step 1, only tops up what's new.
+function mergeIntoCoa(newAccounts, newVatDefaults) {
+  (newAccounts || []).forEach(a => {
+    if (!a || !a.code || !a.name) return;
+    const code = String(a.code).trim();
+    if (!code) return;
+    const existing = ACCOUNTS.find(x => x.code === code);
+    if (existing) existing.name = a.name; // same code — refresh the name in case it changed
+    else ACCOUNTS.push({ code, name: a.name });
+  });
+  ACCOUNTS.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  Object.keys(newVatDefaults || {}).forEach(code => {
+    if (VAT_RATES.includes(newVatDefaults[code])) VAT_DEFAULTS[code] = newVatDefaults[code];
+  });
+  scheduleSaveClientDoc();
+}
+
+// Re-renders every already-visible row after the chart of accounts changes
+// underneath it (Step 1 processed, live lookup run, or an account added/
+// removed manually) so account dropdowns and Use-of-Home-dependent UI don't
+// keep showing stale options.
+function refreshAllRows() {
+  rows.forEach(r => {
+    const tr = document.getElementById('tr_' + r.id);
+    if (tr) tr.innerHTML = buildRowHTML(r);
+  });
+}
+
+// ── CHART OF ACCOUNTS PANEL ──────────────────────────────────────────────────
+// Same "visible and editable, not a black box" approach as the coding-history
+// panel below — every learned account can be removed, and accounts can be
+// added by hand for the odd case Step 1 couldn't confidently read.
+
+function renderCoaPanel() {
+  const panel = document.getElementById('coaPanel');
+  if (!panel) return;
+  if (!currentClientKey) {
+    panel.innerHTML = `<div class="helptext">Select or add a client above to see their chart of accounts here.</div>`;
+    return;
+  }
+  let html = '';
+  if (!ACCOUNTS.length) {
+    html += `<div class="helptext" style="margin-bottom:10px;">No chart of accounts yet for ${esc(currentClientKey)} — drop in a Xero export above, use "Check Xero history" below, or add accounts by hand here.</div>`;
+  } else {
+    html += `<div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''} for ${esc(currentClientKey)}</div>`;
+    html += `<table style="width:100%;font-size:12.5px;border-collapse:collapse;margin-bottom:10px;">
+      <thead><tr>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Code</th>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Account name</th>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Default VAT</th>
+        <th style="border-bottom:1px solid var(--border);"></th>
+      </tr></thead><tbody>`;
+    ACCOUNTS.forEach(a => {
+      html += `<tr>
+        <td style="padding:5px 8px;border-bottom:1px solid var(--border);font-family:'IBM Plex Mono',monospace;">${esc(a.code)}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(a.name)}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(VAT_DEFAULTS[a.code]||'—')}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;">
+          <button type="button" onclick="deleteAccount(${JSON.stringify(a.code)})" title="Remove this account" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>
+        </td>
+      </tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  html += `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+    <input type="text" id="newAccCode" placeholder="Code e.g. 420" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12.5px;">
+    <input type="text" id="newAccName" placeholder="Account name" style="flex:1;min-width:160px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12.5px;">
+    <select id="newAccVat" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:12.5px;">
+      <option value="">Default VAT (optional)</option>
+      ${VAT_RATES.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('')}
+    </select>
+    <button class="btn" type="button" onclick="addAccountManually()">+ Add account</button>
+  </div>`;
+  panel.innerHTML = html;
+}
+
+function addAccountManually() {
+  if (!currentClientKey) { alert('Select or add a client above first.'); return; }
+  const codeEl = document.getElementById('newAccCode');
+  const nameEl = document.getElementById('newAccName');
+  const vatEl = document.getElementById('newAccVat');
+  const code = codeEl.value.trim();
+  const name = nameEl.value.trim();
+  if (!code || !name) return;
+  const newVatDefaults = {};
+  if (vatEl.value) newVatDefaults[code] = vatEl.value;
+  mergeIntoCoa([{ code, name }], newVatDefaults);
+  codeEl.value = ''; nameEl.value = ''; vatEl.value = '';
+  refreshAllRows();
+  renderCoaPanel();
+}
+
+async function deleteAccount(code) {
+  ACCOUNTS = ACCOUNTS.filter(a => a.code !== code);
+  delete VAT_DEFAULTS[code];
+  await saveClientDoc();
+  refreshAllRows();
+  renderCoaPanel();
+}
+
+function ruleKeyFor(supplier, desc) {
+  const s = (supplier || '').trim().toLowerCase();
+  if (s) return 'supplier:' + s;
+  const d = (desc || '').trim().toLowerCase();
+  return d ? 'desc:' + d : null;
+}
+
+function lookupClientRule(supplier, desc) {
+  if (!currentClientKey) return null;
+  const key = ruleKeyFor(supplier, desc);
+  return key ? (currentClientRules[key] || null) : null;
+}
+
+// Records a confirmed acc+VAT pairing against this client — called whenever
+// a row's coding comes from a real signal (the client's own file, a
+// high-confidence AI read, or someone manually setting it), not from a
+// generic default, so history isn't just reinforcing our own fallback guess.
+function recordClientRule(supplier, desc, acc, vat) {
+  if (!currentClientKey || !acc || !vat) return;
+  const key = ruleKeyFor(supplier, desc);
+  if (!key) return;
+  const existing = currentClientRules[key];
+  if (existing && existing.acc === acc && existing.vat === vat) return; // no change
+  currentClientRules[key] = { acc, vat };
+  scheduleSaveClientDoc();
+}
+
+// Compares an explicitly-stated acc/VAT (from a file or AI extraction) against
+// this client's remembered history and, failing that, the standard account
+// default — returns a bracketed note to append to the description if they
+// disagree, or '' if there's nothing to flag. Pure data comparison, no AI call.
+function checkAgainstHistoryAndDefaults(acc, vatExplicit, supplier, desc) {
+  if (!acc) return '';
+  const learned = lookupClientRule(supplier, desc);
+  const code = acc.split(' - ')[0];
+  const stdVat = VAT_DEFAULTS[code] || 'No VAT';
+  const notes = [];
+
+  if (learned) {
+    if (learned.acc && learned.acc !== acc) {
+      notes.push(`this client is usually coded to ${learned.acc}`);
+    }
+    if (vatExplicit && learned.vat && learned.vat !== vatExplicit) {
+      notes.push(`this client's usual VAT here is ${learned.vat}, not ${vatExplicit}`);
+    }
+  } else if (vatExplicit && vatExplicit !== stdVat) {
+    notes.push(`differs from the standard default of ${stdVat} for this account`);
+  }
+
+  return notes.length ? ` [Check: ${notes.join('; ')}]` : '';
+}
+
+// ── PER-CLIENT EXTRA INSTRUCTIONS ────────────────────────────────────────────
+// Free-text notes ("Anything else Claude should know?") that apply whenever
+// Step 2's file/email extraction runs for this client — e.g. "motor expenses
+// should be at 50% business use". Saved per client in shared storage, same
+// pattern as the coding history and chart of accounts above, and folded into
+// the extraction system prompts via extraInstructionsBlock().
+
+// currentExtraInstructions itself is loaded/saved as part of the client doc
+// (see loadClientRules / saveClientDoc above). This just picks up the box's
+// value and debounces a write, same pattern as the coding-history edits.
+let currentExtraInstructions = '';
+
+function scheduleSaveExtraInstructions() {
+  const box = document.getElementById('extraInstructionsBox');
+  currentExtraInstructions = box ? box.value : '';
+  if (!currentClientKey) return;
+  scheduleSaveClientDoc();
+}
+
+// Appended to the extraction system prompts (chambers document extraction,
+// email extraction) whenever there's something to say — empty string (and
+// so no visible change to the prompt) if the box is blank.
+function extraInstructionsBlock() {
+  const text = (document.getElementById('extraInstructionsBox')?.value || '').trim();
+  if (!text) return '';
+  return `\n\nADDITIONAL INSTRUCTIONS FOR THIS CLIENT — apply these when they're relevant to a line item; they override the general defaults above:\n${text}`;
+}
+
+// ── XERO HISTORY LOOKUP (via the connected Xero MCP connector) ─────────────
+// Pulls real, ground-truth coding history straight from Xero for a client,
+// rather than relying only on what's been coded through this tool before.
+// The heavy lifting (finding the right Xero contact, listing their bills/
+// transactions, reading line items) is delegated to Claude via the Xero MCP
+// server attached to this one API call — this code doesn't talk to Xero's
+// API directly, it just asks Claude to and tells it what shape to hand back.
+
+function buildXeroLookupSystemPrompt(clientName) {
+  return `You have access to Xero via MCP tools. This connection may have access to MULTIPLE Xero organisations at once (typical for an accounting practice managing several clients' books) — each organisation belongs to ONE specific self-employed individual. There are no "Contact" records to search for matching a client's name; each client IS an entire organisation, not a contact within someone else's. The Contacts inside each organisation are that client's own suppliers (e.g. a mobile phone provider, a professional body, a bank).
+
+STEPS:
+1. First, list ALL Xero organisations/tenants this connection has access to.
+2. From that list, find the one whose name most closely matches this client: "${clientName}". Match on close/likely spelling (e.g. minor formatting differences, missing/extra titles like "KC", spacing) — but do not force a match if nothing genuinely resembles this name.
+3. If you found a confident match: query THAT SPECIFIC organisation's bills, spend/purchase transactions, and/or invoices, covering as much recent history as you can reasonably retrieve (aim for the last 12 months; use whatever is available if less).
+4. Group what you find by DISTINCT combination of supplier + Xero account + Xero tax rate. Report each distinct combination ONCE — not every individual transaction. A supplier billing the same account/tax rate every month for a year should appear as a single entry (use its most recent occurrence for the date/amount), not twelve. This keeps the result compact and is all that's actually needed — the aim is "how does this client usually code X", not a full transaction log.
+
+This client has no fixed external chart of accounts — report each account's EXACT Xero code and name as they appear in that organisation. These raw values are what will become this client's chart of accounts in this tool, so use exactly what Xero shows, do not rename or reclassify them.
+
+For the tax rate of each combination, also map it to exactly one of these standard categories, only if you're confident: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT. Leave vatRate null rather than forcing an uncertain match.
+
+OUTPUT — once finished, respond with ONLY a JSON object. No markdown, no prose, no code fences, no explanation before or after. Keep it compact — one entry per distinct combination as instructed, not per transaction.
+
+{
+  "availableOrganisations": ["<name of every organisation found in step 1>"],
+  "matchedOrganisationName": "<the organisation name you matched and queried, or null if none confidently matched>",
+  "items": [
+    {
+      "supplier": "<payee/supplier name as it appears in Xero>",
+      "description": "<a short, representative description for this combination>",
+      "accountCode": "<the exact Xero account code for this combination>",
+      "accountName": "<the exact Xero account name for this combination>",
+      "vatRate": "<one of: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT — only if confidently mapped, else null>",
+      "xeroTaxRate": "<the raw Xero tax rate name actually used>",
+      "date": "YYYY-MM-DD — the most recent occurrence of this combination",
+      "amount": <number — the amount from that most recent occurrence>
+    }
+  ]
+}
+
+If matchedOrganisationName is null, leave "items" as [].`;
+}
+
+async function callXeroHistoryLookup(clientName) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8000,
+      system: buildXeroLookupSystemPrompt(clientName),
+      messages: [{ role: 'user', content: `Look up Xero coding history for the client "${clientName}".` }],
+      mcp_servers: [
+        { type: 'url', url: 'https://mcp.xero.com/mcp', name: 'xero-mcp' }
+      ]
+    })
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`API error ${response.status}: ${errText.slice(0,200)}`);
+  }
+  const data = await response.json();
+  // Only the model's own text blocks carry the final JSON — mcp_tool_use and
+  // mcp_tool_result blocks are the intermediate Xero queries/results, not
+  // the answer itself, so they're deliberately excluded here.
+  const joined = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+  let parsed;
+  try {
+    parsed = JSON.parse(extractJsonObject(joined));
+  } catch (e) {
+    throw new Error(`Xero lookup did not return valid JSON: ${e.message}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
+    throw new Error('Xero lookup response was not in the expected shape');
+  }
+  return parsed;
+}
+
+// Converts one Xero-sourced item into this tool's {acc, vat, accountCode,
+// accountName} rule shape — only when both the account and VAT rate were
+// confidently reported by the model. Unmapped items are simply skipped
+// rather than guessed at here. There's no fixed external chart of accounts
+// to match against any more — the account code/name straight from Xero IS
+// the client's chart of accounts, built up via mergeIntoCoa() by the caller.
+function mapXeroItemToRule(item) {
+  if (!item.accountCode || !item.accountName) return null;
+  const vat = VAT_RATES.includes(item.vatRate) ? item.vatRate : null;
+  if (!vat) return null;
+  const code = String(item.accountCode).trim();
+  return { acc: `${code} - ${item.accountName}`, vat, accountCode: code, accountName: item.accountName };
+}
+
+async function checkXeroHistory() {
+  const clientName = document.getElementById('clientName').value.trim();
+  const btn = document.getElementById('xeroCheckBtn');
+  const statusEl = document.getElementById('xeroCheckStatus');
+  if (!clientName) return;
+
+  // This live lookup used to delegate to Claude with a Xero MCP server
+  // attached directly on the API request (mcp_servers) — that only works
+  // from the in-chat preview's raw fetch() to api.anthropic.com, which a
+  // published page can't do. There's a published-page equivalent (the
+  // `mcp` capability, calling the viewer's own connected Xero connector),
+  // but it needs a live Xero connection to observe a real tool call before
+  // it can be wired up safely — rather than guess at that shape, this
+  // path is disabled for now. Step 1 (upload a Xero export file) below
+  // does the same job without a live connection and is fully working.
+  statusEl.textContent = 'This live Xero connector lookup needs to be rebuilt for the published version of this tool and is temporarily unavailable — use "Process Xero export" below instead (upload an Account Transactions/bills export) to build the chart of accounts and coding history.';
+  return;
+
+  // eslint-disable-next-line no-unreachable
+  btn.disabled = true;
+  statusEl.textContent = `Looking up Xero organisations and matching "${clientName}"… this can take a little while.`;
+
+  try {
+    const { availableOrganisations, matchedOrganisationName, items } = await callXeroHistoryLookup(clientName);
+    const orgList = Array.isArray(availableOrganisations) ? availableOrganisations : [];
+
+    if (!matchedOrganisationName) {
+      statusEl.innerHTML = orgList.length
+        ? `⚠ The connected Xero organisation (${orgList.map(esc).join(', ')}) doesn't match "${esc(clientName)}". Only one organisation can be connected at a time — go to Settings → Connectors → Xero, disconnect, reconnect, and pick ${esc(clientName)}'s organisation instead.`
+        : `⚠ This connection doesn't appear to have access to any Xero organisations. Check the Xero connector is authorised in Claude's settings.`;
+      btn.disabled = false;
+      return;
+    }
+
+    let recorded = 0, unmapped = 0;
+    const newAccounts = [];
+    const newVatDefaults = {};
+    items.forEach(item => {
+      const mapped = mapXeroItemToRule(item);
+      if (mapped) {
+        recordClientRule(item.supplier, item.description, mapped.acc, mapped.vat);
+        newAccounts.push({ code: mapped.accountCode, name: mapped.accountName });
+        if (!newVatDefaults[mapped.accountCode]) newVatDefaults[mapped.accountCode] = mapped.vat;
+        recorded++;
+      } else {
+        unmapped++;
+      }
+    });
+    mergeIntoCoa(newAccounts, newVatDefaults);
+    refreshAllRows();
+    renderCoaPanel();
+    renderClientHistoryPanel();
+    statusEl.textContent = items.length
+      ? `✓ Matched Xero org "${matchedOrganisationName}" — found ${items.length} coding combination${items.length!==1?'s':''}, added/updated ${recorded} rule${recorded!==1?'s':''}${unmapped ? `; ${unmapped} couldn't be confidently mapped to a VAT rate` : ''}. Chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}.`
+      : `✓ Matched Xero org "${matchedOrganisationName}" but found no bills/transactions there yet.`;
+  } catch (e) {
+    statusEl.textContent = 'Could not look up Xero history: ' + (e.message || e);
+  }
+
+  btn.disabled = false;
+}
+
+// ── STEP 1: XERO EXPORT FILE UPLOAD (chart of accounts + coding history) ────
+// Alternative to the live "Check Xero history" connector lookup above, for
+// when there's no live connection, or the accountant would rather just drop
+// in a file: an export of the client's last year or so of transactions from
+// Xero (an "Account Transactions" report, a bills/purchases export, etc.,
+// .csv or .xlsx). Read once, it reconstructs the same two things the live
+// lookup does — the client's chart of accounts, and which account/VAT rate
+// each recurring supplier is normally coded to — via the same mergeIntoCoa()
+// and recordClientRule() calls, so it doesn't matter which path was used.
+
+function readFileAsPlainText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsText(file);
+  });
+}
+
+// Turns a dropped Xero export into plain text the model can read — a CSV/TXT
+// file is used as-is, an .xlsx/.xls workbook has every sheet converted to CSV
+// text (covers exports where the report lands on a sheet other than the
+// first, or has more than one tab).
+async function extractTextFromXeroExport(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.csv') || name.endsWith('.txt')) {
+    return await readFileAsPlainText(file);
+  }
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  return wb.SheetNames.map(sheetName => {
+    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName]);
+    return `--- Sheet: ${sheetName} ---\n${csv}`;
+  }).join('\n\n');
+}
+
+// The `sample` capability caps prompts at 64 KiB of text total (system
+// instructions + the data below), so this is set with headroom for the
+// ~2 KB instruction block rather than right up against the limit.
+const XERO_EXPORT_TEXT_LIMIT = 55000; // enough for a year of transactions on most clients
+
+function buildXeroFileExtractionSystemPrompt() {
+  return `You are reading an export of a client's transaction history from Xero — e.g. an "Account Transactions" report, a bills/purchases export, or similar — covering roughly the last year. Reconstruct two things from it:
+
+1. The client's chart of accounts — every distinct expense/purchase account code and name actually used in this data. Use the exact code and name as they appear; don't rename or reclassify them.
+2. How recurring suppliers/expense types are normally coded — grouped by DISTINCT combination of supplier + account + tax rate, reported ONCE each (use the most recent occurrence's date/amount for a combination that recurs many times), not one row per transaction. A supplier billed to the same account/tax rate every month for a year should appear as a single entry, not twelve.
+
+Ignore any income, sales, or fee/billing rows — this tool only tracks purchases/expenses, not the client's own invoicing.
+
+For the tax rate of each combination, map whatever tax rate name Xero uses to exactly one of these standard categories: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT. If you can't confidently map it, leave vatRate null rather than guessing.
+
+OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fences, no explanation before or after.
+
+{
+  "accounts": [ { "code": "<exact account code as it appears>", "name": "<exact account name as it appears>" } ],
+  "items": [
+    {
+      "supplier": "<payee/contact name>",
+      "description": "<a short, representative description for this combination>",
+      "accountCode": "<the code from accounts above>",
+      "accountName": "<the matching account name>",
+      "vatRate": "<one of the 5 categories above, or null>",
+      "date": "YYYY-MM-DD — the most recent occurrence of this combination",
+      "amount": <number — the amount from that most recent occurrence>
+    }
+  ]
+}
+
+Keep "items" compact — one entry per distinct supplier+account+tax-rate combination, not per transaction.`;
+}
+
+async function callXeroFileExtraction(fileText) {
+  const { sample } = await getCaps();
+  if (!sample) {
+    throw new Error('Asking Claude is not available in this view — the page owner may need to grant it, or try opening the artifact in claude.ai directly.');
+  }
+  const prompt = `${buildXeroFileExtractionSystemPrompt()}\n\nHere is the exported transaction data:\n\n${fileText}`;
+  let parsed;
+  try {
+    parsed = await sample.json(prompt, { modelTier: 'default', cache: false });
+  } catch (e) {
+    if (e && e.code === 'invalid_json') {
+      throw new Error('Model did not return valid JSON: ' + e.message);
+    }
+    throw new Error(sampleErrorMessage(e));
+  }
+  if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.items)) {
+    throw new Error('Model response was not in the expected shape');
+  }
+  return parsed;
+}
+
+// Turns a rejected sample()/sample.json() call into a short, viewer-facing
+// message. Branches on `code` per the runtime contract rather than showing
+// the raw (developer-facing) `message`.
+function sampleErrorMessage(e) {
+  const code = e && e.code;
+  switch (code) {
+    case 'not_granted': return 'Permission to ask Claude was declined for this session.';
+    case 'sampling_disabled': return 'Asking Claude is not available for this account.';
+    case 'rate_limited': return 'Too many requests right now — please wait a moment and try again.';
+    case 'prompt_too_large': return 'That file is too large for one request — try a shorter export or fewer sheets.';
+    case 'session_expired': return 'Your session expired — please reload and sign in again.';
+    case 'refused': return 'Claude declined to process that input.';
+    case 'cancelled': return 'Cancelled.';
+    default: return (e && e.message) ? e.message : 'Something went wrong asking Claude.';
+  }
+}
+
+let xeroExportQueue = [];
+let xeroExportIdCounter = 0;
+
+function handleXeroExportFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const newItems = files.map(file => ({ id: xeroExportIdCounter++, file, status: 'queued', error: null }));
+  xeroExportQueue.push(...newItems);
+  renderXeroExportFileList();
+}
+
+function renderXeroExportFileList() {
+  const box = document.getElementById('xeroExportFileList');
+  if (!box) return;
+  box.innerHTML = '';
+  xeroExportQueue.forEach(item => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12.5px;';
+    const statusIcon = { queued: '⏳', working: '⏳', done: '✓', error: '⚠' }[item.status] || '';
+    row.innerHTML = `<span>${statusIcon}</span><span style="flex:1;">${esc(item.file.name)}</span>${item.error ? `<span style="color:var(--red);">${esc(item.error)}</span>` : ''}`;
+    const rm = document.createElement('button');
+    rm.textContent = '×'; rm.className = 'del-row'; rm.type = 'button';
+    rm.addEventListener('click', () => {
+      xeroExportQueue = xeroExportQueue.filter(q => q.id !== item.id);
+      renderXeroExportFileList();
+    });
+    row.appendChild(rm);
+    box.appendChild(row);
+  });
+  const btn = document.getElementById('processXeroExportBtn');
+  if (btn) btn.disabled = xeroExportQueue.every(q => q.status !== 'queued');
+}
+
+async function processXeroExportQueue() {
+  const statusEl = document.getElementById('xeroExportStatus');
+  const btn = document.getElementById('processXeroExportBtn');
+  const nameNow = document.getElementById('clientName').value.trim();
+  if (!nameNow) {
+    statusEl.textContent = 'Select or add a client above first, so this chart of accounts is saved against them.';
+    return;
+  }
+  if (nameNow !== currentClientKey) await loadClientRules();
+
+  btn.disabled = true;
+  const toProcess = xeroExportQueue.filter(q => q.status === 'queued');
+  let totalAccounts = 0, totalRules = 0;
+
+  for (const item of toProcess) {
+    item.status = 'working';
+    renderXeroExportFileList();
+    statusEl.textContent = `Reading ${item.file.name}…`;
+    try {
+      const fullText = await extractTextFromXeroExport(item.file);
+      // A full year of transactions can easily be 100KB+ of CSV text, well
+      // over the 64 KiB-total prompt cap the published page's `sample`
+      // capability allows in one call — so rather than silently dropping
+      // most of the file, split it into line-safe chunks and analyse each
+      // one, merging the learned accounts/rules after every chunk.
+      let chunks = chunkTextByLines(fullText, XERO_EXPORT_TEXT_LIMIT);
+      let cappedNote = '';
+      if (chunks.length > MAX_XERO_EXPORT_CHUNKS) {
+        chunks = chunks.slice(0, MAX_XERO_EXPORT_CHUNKS);
+        cappedNote = ` — this file is very large, only the first ${MAX_XERO_EXPORT_CHUNKS} sections were analysed`;
+      }
+
+      let recorded = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
+        const { accounts, items } = await callXeroFileExtraction(chunks[i]);
+        const newVatDefaults = {};
+        items.forEach(it => {
+          const vat = VAT_RATES.includes(it.vatRate) ? it.vatRate : null;
+          if (it.accountCode && it.accountName && vat) {
+            recordClientRule(it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat);
+            if (!newVatDefaults[it.accountCode]) newVatDefaults[it.accountCode] = vat;
+            recorded++;
+          }
+        });
+        mergeIntoCoa(accounts, newVatDefaults);
+      }
+      totalRules += recorded;
+      item.status = 'done';
+      item.error = cappedNote ? cappedNote.replace(/^ — /, '') : null;
+    } catch (e) {
+      item.status = 'error';
+      item.error = e.message || String(e);
+    }
+    renderXeroExportFileList();
+  }
+
+  // Chart-of-accounts/rule saves above are debounced (scheduleSaveClientDoc);
+  // make sure the final state is actually persisted before telling the user
+  // it's done, rather than leaving it to fire on its own after this returns.
+  await saveClientDoc();
+
+  refreshAllRows();
+  renderCoaPanel();
+  renderClientHistoryPanel();
+  const failed = toProcess.filter(q => q.status === 'error' && !String(q.error||'').includes('very large')).length;
+  totalAccounts = ACCOUNTS.length;
+  statusEl.textContent = `✓ Processed ${toProcess.length}/${toProcess.length} file${toProcess.length!==1?'s':''} — chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}, ${totalRules} coding rule${totalRules!==1?'s':''} learned from this batch.`;
+  // Drop the successfully-processed files from the queue so re-running
+  // "Process" only touches ones that failed or were added since.
+  xeroExportQueue = xeroExportQueue.filter(q => q.status !== 'done');
+  renderXeroExportFileList();
+}
+
+// Splits text into chunks of at most maxChars, breaking only on line
+// boundaries so no CSV row is ever cut mid-line.
+function chunkTextByLines(text, maxChars) {
+  const lines = text.split('\n');
+  const chunks = [];
+  let current = '';
+  for (const line of lines) {
+    const withLine = current ? current + '\n' + line : line;
+    if (withLine.length > maxChars && current) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = withLine;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length ? chunks : [''];
+}
+const MAX_XERO_EXPORT_CHUNKS = 8; // safety cap on AI calls for one file
+
+// ── SHARED CLIENT LIST (drives the dropdown) ────────────────────────────────
+// A dropdown rather than free text so "John Smith" / "Jon Smith" / "J Smith"
+// from different colleagues can't silently fragment one client's history
+// into several. The list itself is shared storage too, so a client added by
+// one person shows up for everyone else immediately.
+
+const CLIENT_LIST_DOC = 'meta/client-list';
+let clientList = [];
+
+async function loadClientList() {
+  clientList = [];
+  const { db } = await getCaps();
+  if (!db) { renderClientDropdown(); return; }
+  try {
+    const snap = await db.doc(CLIENT_LIST_DOC).get();
+    if (snap.exists) {
+      const data = snap.data() || {};
+      if (Array.isArray(data.clients)) clientList = data.clients;
+    }
+  } catch (e) {
+    clientList = [];
+  }
+  renderClientDropdown();
+}
+
+async function saveClientList() {
+  const { db } = await getCaps();
+  if (!db) return;
+  try {
+    await db.doc(CLIENT_LIST_DOC).set({ clients: clientList });
+  } catch (e) {
+    console.error('Could not save the shared client list:', e);
+  }
+}
+
+function renderClientDropdown() {
+  const sel = document.getElementById('clientName');
+  const prevValue = sel.value;
+  sel.innerHTML = '<option value="">— select a client —</option>';
+  clientList.slice().sort((a, b) => a.localeCompare(b)).forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  const addOpt = document.createElement('option');
+  addOpt.value = '__new__';
+  addOpt.textContent = '+ Add a new client…';
+  sel.appendChild(addOpt);
+  if (prevValue && clientList.includes(prevValue)) sel.value = prevValue;
+}
+
+function onClientSelectChange() {
+  const sel = document.getElementById('clientName');
+  if (sel.value === '__new__') {
+    document.getElementById('newClientRow').style.display = 'flex';
+    sel.value = currentClientKey || '';
+    document.getElementById('newClientInput').focus();
+    return;
+  }
+  document.getElementById('newClientRow').style.display = 'none';
+  refreshExportBtn();
+  loadClientRules();
+}
+
+async function confirmAddNewClient() {
+  const input = document.getElementById('newClientInput');
+  const name = input.value.trim();
+  if (!name) return;
+  // Case-insensitive de-dupe — re-adding "DJRKC" when "djrkc" already exists
+  // just selects the existing one rather than creating a near-duplicate that
+  // would silently split its history in two.
+  const existing = clientList.find(n => n.toLowerCase() === name.toLowerCase());
+  if (!existing) {
+    clientList.push(name);
+    await saveClientList();
+  }
+  renderClientDropdown();
+  document.getElementById('clientName').value = existing || name;
+  document.getElementById('newClientRow').style.display = 'none';
+  input.value = '';
+  refreshExportBtn();
+  await loadClientRules();
+}
+
+function cancelAddNewClient() {
+  document.getElementById('newClientRow').style.display = 'none';
+  document.getElementById('newClientInput').value = '';
+  document.getElementById('clientName').value = currentClientKey || '';
+}
+
+// ── CLIENT HISTORY PANEL ─────────────────────────────────────────────────────
+// Makes the learned rules visible and editable rather than a black box —
+// each row can be removed individually if something got coded wrong once
+// and shouldn't keep being suggested.
+
+function renderClientHistoryPanel() {
+  const panel = document.getElementById('clientHistoryPanel');
+  if (!currentClientKey) { panel.innerHTML = ''; return; }
+  const keys = Object.keys(currentClientRules);
+  if (!keys.length) {
+    panel.innerHTML = `<div class="helptext" style="margin:-8px 0 16px;">No coding history yet for ${esc(currentClientKey)} — it'll build up as expenses are coded for them.</div>`;
+    return;
+  }
+  let html = `<div class="email-paste-bar" style="margin:-8px 0 16px;">
+    <div class="email-paste-title">Coding history for ${esc(currentClientKey)} — shared with your team</div>
+    <table style="width:100%;font-size:12.5px;border-collapse:collapse;">
+      <thead><tr>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Matched on</th>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Account</th>
+        <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">VAT rate</th>
+        <th style="border-bottom:1px solid var(--border);"></th>
+      </tr></thead><tbody>`;
+  keys.sort().forEach(key => {
+    const rule = currentClientRules[key];
+    const label = key.startsWith('supplier:') ? `Supplier: ${key.slice(9)}` : `Description: ${key.slice(5)}`;
+    html += `<tr>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(label)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(rule.acc)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(rule.vat)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;">
+        <button type="button" onclick="deleteClientRule(${JSON.stringify(key)})" title="Remove this learned rule" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>
+      </td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>`;
+  panel.innerHTML = html;
+}
+
+async function deleteClientRule(key) {
+  delete currentClientRules[key];
+  await saveClientDoc();
+  renderClientHistoryPanel();
+}
+
+// ── ACCOUNT / VAT HELPERS ────────────────────────────────────────────────────
+
+function accOptions(selected) {
+  const blank = `<option value=""${!selected?' selected':''}>— select account —</option>`;
+  return blank + ACCOUNTS.map(a => {
+    const val = `${a.code} - ${a.name}`;
+    return `<option value="${val}"${val===selected?' selected':''}>${val}</option>`;
+  }).join('');
+}
+
+function vatOptions(selected) {
+  const blank = `<option value=""${!selected?' selected':''}>— select VAT rate —</option>`;
+  return blank + VAT_RATES.map(v =>
+    `<option value="${v}"${v===selected?' selected':''}>${v}</option>`
+  ).join('');
+}
+
+function defaultVat(accFull) {
+  const code = (accFull||'').split(' - ')[0];
+  return VAT_DEFAULTS[code] || 'No VAT';
+}
+
+// ── FILE PARSING ─────────────────────────────────────────────────────────────
+
+function excelDateToISO(val) {
+  if (!val) return '';
+  if (val instanceof Date) return val.toISOString().slice(0,10);
+  if (typeof val === 'number') {
+    // Excel serial date
+    const d = new Date(Math.round((val - 25569) * 86400 * 1000));
+    return d.toISOString().slice(0,10);
+  }
+  if (typeof val === 'string') {
+    // Try parsing various formats
+    const clean = val.trim();
+    // DD/MM/YYYY
+    const m1 = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m1) return `${m1[3]}-${m1[2].padStart(2,'0')}-${m1[1].padStart(2,'0')}`;
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+    return clean;
+  }
+  return '';
+}
+
+function findHeaderRowIndex(data) {
+  // Locate the header row dynamically instead of assuming it's always row index 1.
+  // The current tall template has headers on row index 1 (Excel row 2), but legacy
+  // templates (e.g. the "MTD Template" DataDear/Xero format) bury the header several
+  // rows down (e.g. Excel row 6) after title/notes rows.
+  const scanLimit = Math.min(data.length, 25);
+  for (let i = 0; i < scanLimit; i++) {
+    const r = data[i];
+    if (!r) continue;
+    const colA = String(r[0]||'').trim().toLowerCase();
+    const colB = String(r[1]||'').trim().toLowerCase();
+    if (colA.startsWith('post') && colB.includes('account')) {
+      return i;
+    }
+  }
+  return 1; // fallback to the standard tall-template assumption
+}
+
+function stripLegacyVatSuffix(vatRaw) {
+  // Legacy "MTD Template" format appends a trailing percentage in parentheses,
+  // e.g. "20% (VAT on Expenses) (20%)" or "No VAT (0%)" — strip that suffix so
+  // the value matches our known VAT_RATES list exactly.
+  return String(vatRaw||'').replace(/\s*\(\d+(\.\d+)?%\)\s*$/, '').trim();
+}
+
+function parseFile(file) {
+  return new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, {type:'array', cellDates:true});
+      // Sheet selection priority: current tall template ("Expenses") first,
+      // then the legacy "MTD Template" (DataDear/Xero) sheet, then fall back
+      // to whatever sheet is first in the workbook.
+      let wsName;
+      if (wb.SheetNames.includes('Expenses')) wsName = 'Expenses';
+      else if (wb.SheetNames.includes('MTD Template')) wsName = 'MTD Template';
+      else wsName = wb.SheetNames[0];
+      const ws = wb.Sheets[wsName];
+      // raw:true (with cellDates:true above) returns genuine Date objects for date
+      // cells and plain numbers for numeric cells, instead of locale-formatted
+      // display strings. This matters because some templates render dates as
+      // "DD/MM/YYYY" while others (e.g. the legacy "MTD Template") render the same
+      // underlying date as US-style "M/D/YY" — parsing the formatted string was
+      // ambiguous and silently dropped dates from that legacy format.
+      const data = XLSX.utils.sheet_to_json(ws, {header:1, defval:null, raw:true});
+
+      // Header row position varies by template — locate it dynamically rather
+      // than assuming a fixed row, then start reading data from the row after it.
+      // Cols: A=Post? B=TypeOfExpense C=VATRate D=PostType(hidden,unused) E=Reference F=Date G=Supplier/PropertyName H=Description I=GrossAmount
+      // Same column layout is shared by the barrister template, the property rental template,
+      // and the legacy "MTD Template" format — only the header row position and VAT text differ.
+      const headerRowIdx = findHeaderRowIndex(data);
+      let imported = 0;
+      let vatDefaultedCount = 0;
+      // NOTE: rows are deliberately NOT cleared here. Every file processed
+      // through the unified upload panel — template, email, or chambers bill —
+      // ADDS to the existing table rather than wiping it, so a client's separate
+      // monthly files (or a template plus a chambers bill) can all be brought
+      // in together. Use "Clear all" for a full reset.
+
+      for (let i = headerRowIdx + 1; i < data.length; i++) {
+        const r = data[i];
+        if (!r || r.every(v => !v)) continue;
+        const grossRaw = r[8];
+        const gross = typeof grossRaw === 'number' ? grossRaw : parseFloat(String(grossRaw||'').replace(/[£,]/g,''));
+        if (!gross && !r[7] && !r[6]) continue; // skip fully empty
+
+        const accRaw = String(r[1]||'').trim();
+        // Use exactly what the client provided — match to our account list, blank if unrecognised
+        let accFull = '';
+        if (accRaw) {
+          const codeMatch = accRaw.match(/^(\d{3})/);
+          if (codeMatch) {
+            const found = ACCOUNTS.find(a => a.code === codeMatch[1]);
+            accFull = found ? `${found.code} - ${found.name}` : ''; // blank if code not in list
+          }
+          // if no numeric code prefix at all, leave blank — client left it empty or typed something invalid
+        }
+
+        const vatRaw = stripLegacyVatSuffix(r[2]);
+        // Use exactly what the client provided — match to our VAT list, blank if unrecognised
+        const vatMatch = VAT_RATES.find(v => v.toLowerCase() === vatRaw.toLowerCase());
+        // If the file didn't supply a usable VAT rate but we do know the account,
+        // fall back to the same account-based default used when a user picks an
+        // account manually from the dropdown (see onAccChange/defaultVat) — this
+        // keeps behaviour consistent whether VAT is filled during import or by hand.
+        const vat = vatMatch || (accFull ? defaultVat(accFull) : '');
+        const vatWasDefaulted = !vatMatch && !!accFull;
+
+        const dateRaw = r[5];
+        let dateISO = '';
+        if (dateRaw instanceof Date && !isNaN(dateRaw.getTime())) {
+          // Genuine Excel date cell — read the underlying date directly rather than
+          // a formatted display string, which sidesteps DD/MM vs MM/DD ambiguity.
+          dateISO = dateRaw.toISOString().slice(0,10);
+        } else if (dateRaw !== null && dateRaw !== undefined && dateRaw !== '') {
+          if (typeof dateRaw === 'number') {
+            // Raw Excel serial date number
+            const d = new Date(Math.round((dateRaw - 25569) * 86400 * 1000));
+            dateISO = d.toISOString().slice(0,10);
+          } else {
+            // Cell stored as plain text rather than an Excel date — fall back to
+            // string parsing (assumes DD/MM/YYYY, the convention used when staff
+            // type dates manually).
+            dateISO = excelDateToISO(String(dateRaw));
+          }
+        }
+
+        const supplierVal = String(r[6]||'').trim();
+        const descVal = String(r[7]||'').trim();
+
+        // If the client's own file explicitly states both an account and a
+        // VAT rate, that's a real signal — worth checking against this
+        // client's remembered history and the standard defaults, and worth
+        // remembering for next time. A blank cell that just got defaulted
+        // below is NOT a real signal, so it's excluded from both.
+        let flagNote = '';
+        if (accFull && vatMatch) {
+          flagNote = checkAgainstHistoryAndDefaults(accFull, vatMatch, supplierVal, descVal);
+          recordClientRule(supplierVal, descVal, accFull, vatMatch);
+        }
+
+        addRow({
+          post: String(r[0]||'YES').trim().toUpperCase() === 'NO' ? 'NO' : 'YES',
+          acc: accFull,
+          vat: vat,
+          ref: String(r[4]||'').trim(),
+          date: dateISO,
+          supplier: supplierVal,
+          desc: descVal + flagNote,
+          gross: isNaN(gross) ? '' : gross,
+          bu: '',
+          home: false,
+        });
+        imported++;
+        if (vatWasDefaulted) vatDefaultedCount++;
+      }
+
+      const blankAcc = rows.filter(r => !r.acc).length;
+      const blankVat = rows.filter(r => !r.vat).length;
+      let alertMsg = `✓ Imported ${imported} row${imported!==1?'s':''} from "${file.name}"${wsName==='MTD Template'?' (legacy MTD Template format detected)':''}.`;
+      if (blankAcc || blankVat) {
+        alertMsg += ` ${blankAcc+blankVat} field${blankAcc+blankVat!==1?'s need':' needs'} attention — rows with missing account or VAT rate are highlighted.`;
+      } else if (vatDefaultedCount) {
+        alertMsg += ` ${vatDefaultedCount} row${vatDefaultedCount!==1?'s':''} had no VAT rate in the file — defaulted based on account code; please double-check before exporting.`;
+      } else {
+        alertMsg += ` Review % BU and home proportion as needed, then export.`;
+      }
+      setAlert(alertMsg, blankAcc||blankVat ? 'warn' : 'success');
+      showTable();
+      checkHomeRows();
+      resolve(imported);
+    } catch(err) {
+      setAlert('Could not read file: ' + err.message + '. Please ensure it is the standard client expense template (.xlsx).', 'warn');
+      reject(err);
+    }
+  };
+  reader.onerror = () => reject(new Error('Could not read file'));
+  reader.readAsArrayBuffer(file);
+  });
+}
+
+// ── MSG FILE PARSER ───────────────────────────────────────────────────────────
+
+function parseMsgFile(file) {
+  return new Promise((resolve, reject) => {
+  setAlert('Reading email file…', 'info');
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    try {
+      const bytes = new Uint8Array(e.target.result);
+      let text = '';
+
+      // Primary method: properly parse the .msg OLE/CFB container structure
+      // (Outlook .msg files store the body as a named property stream, e.g.
+      // "__substg1.0_1000001F" for unicode body or "...001E" for ANSI body).
+      // We reuse the CFB parser already bundled inside the XLSX library
+      // rather than scanning raw bytes for text-looking runs, which was unreliable.
+      try {
+        const cfb = XLSX.CFB.parse(bytes);
+        text = extractMsgBodyFromCFB(cfb);
+      } catch (cfbErr) {
+        text = '';
+      }
+
+      // Fallback: old heuristic byte-scan, only used if CFB parsing fails
+      // (e.g. a corrupted file or one that isn't really a valid .msg container)
+      if (!text || text.trim().length < 10) {
+        text = extractMsgText(bytes);
+      }
+
+      if (!text || text.trim().length < 10) {
+        setAlert('Could not read email content from this .msg file. Try copying the email body and pasting it in the text box below instead.', 'warn');
+        resolve(0);
+        return;
+      }
+
+      // Populate the paste box and trigger extraction
+      document.getElementById('emailPasteBox').value = text;
+      setAlert('Email content extracted — running expense detection…', 'info');
+      const count = await parseEmail();
+      resolve(count || 0);
+    } catch(err) {
+      setAlert('Could not read .msg file: ' + err.message + '. Try pasting the email text instead.', 'warn');
+      reject(err);
+    }
+  };
+  reader.onerror = () => reject(new Error('Could not read file'));
+  reader.readAsArrayBuffer(file);
+  });
+}
+
+function extractMsgBodyFromCFB(cfb) {
+  // PidTagBody (0x1000) as PT_UNICODE (0x001F) — the standard plain-text body stream
+  let entry = XLSX.CFB.find(cfb, '__substg1.0_1000001F');
+  if (entry && entry.content && entry.content.length) {
+    return decodeMsgStream(entry.content, true);
+  }
+  // Fallback: PidTagBody as PT_STRING8 / ANSI (0x001E)
+  entry = XLSX.CFB.find(cfb, '__substg1.0_1000001E');
+  if (entry && entry.content && entry.content.length) {
+    return decodeMsgStream(entry.content, false);
+  }
+  return '';
+}
+
+function decodeMsgStream(content, isUnicode) {
+  const bytes = content instanceof Uint8Array ? content : new Uint8Array(content);
+  const decoder = new TextDecoder(isUnicode ? 'utf-16le' : 'windows-1252', { fatal: false });
+  return decoder.decode(bytes).replace(/\u0000+$/, '').trim();
+}
+
+function extractMsgText(bytes) {
+  // Scan for readable ASCII/UTF-8 text runs of meaningful length
+  // MSG files store body text in multiple formats; we grab the longest clean run
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const decoder16 = new TextDecoder('utf-16le', { fatal: false });
+
+  let best = '';
+
+  // Try UTF-16LE runs (Outlook stores body as UTF-16)
+  for (let i = 0; i < bytes.length - 40; i++) {
+    // Look for runs where every other byte is 0 (UTF-16LE ASCII range)
+    if (bytes[i+1] === 0 && bytes[i] >= 0x20 && bytes[i] < 0x7f) {
+      let end = i;
+      while (end < bytes.length - 1 && bytes[end+1] === 0 && (bytes[end] >= 0x09)) {
+        end += 2;
+      }
+      const len = end - i;
+      if (len > 80) {
+        const chunk = decoder16.decode(bytes.slice(i, end));
+        const cleaned = chunk.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '').trim();
+        if (cleaned.length > best.length && /[a-zA-Z]{3,}/.test(cleaned)) {
+          best = cleaned;
+        }
+      }
+    }
+  }
+
+  // Also try plain UTF-8/ASCII runs
+  let start = -1;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    const printable = (b >= 0x20 && b < 0x7f) || b === 0x09 || b === 0x0a || b === 0x0d;
+    if (printable) {
+      if (start === -1) start = i;
+    } else {
+      if (start !== -1 && (i - start) > 120) {
+        const chunk = decoder.decode(bytes.slice(start, i)).trim();
+        const cleaned = stripHtml(chunk);
+        if (cleaned.length > best.length && /[a-zA-Z]{3,}/.test(cleaned)) {
+          best = cleaned;
+        }
+      }
+      start = -1;
+    }
+  }
+
+  return best.slice(0, 4000); // cap at 4000 chars — enough for any expense email
+}
+
+function stripHtml(html) {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+
+
+function getQuarterEndDate() {
+  const year = document.getElementById('yearInput').value || new Date().getFullYear();
+  const customDate = document.getElementById('customQuarterDate').value;
+  return customDate || `${year}-03-31`;
+}
+
+// Same account/VAT/business-use-aware extraction as document parsing above,
+// just phrased for an email rather than an invoice image/PDF — shares the
+// chart of accounts, coding history, and extra-instructions plumbing so an
+// emailed expense list gets coded the same way a chambers bill would.
+function buildEmailExtractionSystemPrompt() {
+  const coaText = buildChartOfAccountsText();
+
+  return `You are extracting expense line items from an email for a UK self-employed professional's bookkeeping, for import into a Xero-style expense tracker.
+
+The email text may list one or more expenses, receipts, or invoiced items. Extract every distinct chargeable expense as its own row.
+
+CHART OF ACCOUNTS (choose the single best-fit code per line item; use the exact code shown; leave null if nothing fits confidently):
+${coaText}
+
+RULES:
+- "supplier" is the company or person paid, or null if unclear.
+- "description" is a short factual description of the expense.
+- "amount" is the numeric GBP amount (number, not string), or null if not stated.
+- "date" is in YYYY-MM-DD format if found in the text, otherwise null.
+- Use the account's default VAT rate shown above unless the email states otherwise.
+- Set "businessUsePercent" only if the additional instructions below specify a business-use percentage that applies to this expense (e.g. "motor expenses at 50% business use"); otherwise leave it null (100% business use).
+- Set "confidence" to "high" if the account code and amount are clearly evident; "medium" if inferred; "low" if guessing.${extraInstructionsBlock()}
+
+OUTPUT — respond with ONLY a JSON array, no markdown, no preamble, no code fences. If nothing extractable is found, return [].
+
+Each element:
+{
+  "date": "YYYY-MM-DD" or null,
+  "accountCode": "<one of the codes above>" or null,
+  "vatRate": "<one of: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT>",
+  "supplier": "<string>" or null,
+  "description": "<string>",
+  "amount": <number> or null,
+  "businessUsePercent": <number 0-100> or null,
+  "confidence": "high" | "medium" | "low",
+  "issues": "<string, empty if none>"
+}`;
+}
+
+async function parseEmail() {
+  const text = document.getElementById('emailPasteBox').value.trim();
+  if (!text) {
+    setEmailStatus('Please paste some email text first.', 'warn');
+    return 0;
+  }
+
+  const fallbackDate = getQuarterEndDate();
+
+  setEmailStatus('Extracting expenses…', 'info');
+
+  try {
+    const { sample } = await getCaps();
+    if (!sample) throw new Error('Asking Claude is not available in this view.');
+    const prompt = `${buildEmailExtractionSystemPrompt()}\n\nHere is the email text:\n\n${text}`;
+    let expenses;
+    try {
+      expenses = await sample.json(prompt, { modelTier: 'default', cache: false });
+    } catch (e) {
+      if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
+      throw new Error(sampleErrorMessage(e));
+    }
+
+    if (!Array.isArray(expenses) || expenses.length === 0) {
+      setEmailStatus('No expenses found in that text. Try rephrasing or check the content.', 'warn');
+      return 0;
+    }
+
+    let added = 0;
+    let needsAttention = 0;
+    expenses.forEach(e => {
+      const mapped = mapChambersRowToInternal(e);
+      if (!mapped.date) mapped.date = fallbackDate;
+      if (!mapped.acc || !mapped.vat) needsAttention++;
+      addRow(mapped);
+      added++;
+    });
+
+    document.getElementById('emailPasteBox').value = '';
+    showTable();
+    checkHomeRows();
+    setEmailStatus(`✓ ${added} expense${added!==1?'s':''} added${needsAttention ? ` — ${needsAttention} need account/VAT set` : ''}.`, needsAttention ? 'warn' : 'success');
+    setAlert(`✓ ${added} row${added!==1?'s':''} extracted from email.${needsAttention ? ` ${needsAttention} need account/VAT filled in.` : ''}`, needsAttention ? 'warn' : 'success');
+    return added;
+
+  } catch(err) {
+    setEmailStatus('Could not extract expenses: ' + err.message, 'warn');
+  }
+
+  return 0;
+}
+
+function setEmailStatus(msg, type) {
+  const el = document.getElementById('emailStatus');
+  const colours = { info: 'var(--text-muted)', success: 'var(--green)', warn: 'var(--amber)' };
+  el.style.color = colours[type] || 'var(--text-muted)';
+  el.textContent = msg;
+}
+
+// ── UNIFIED FILE UPLOAD (template / email / chambers-bill AI extraction) ───
+// One drop zone and one queue handle every file type the client might send —
+// .xlsx/.xls templates, Outlook .msg emails, and PDF/PNG/JPG chambers bills —
+// so nothing needs sorting into the "right" upload box first. Each file is
+// routed to the existing parser for its type; every path appends rows rather
+// than clearing the table (see parseFile's and addRow's own notes), which is
+// what makes dropping in several months' files, one at a time or all together,
+// work without losing what's already been added.
+
+let uploadQueue = [];
+let uploadQueueIdCounter = 0;
+
+const unifiedDropZone = document.getElementById('unifiedDropZone');
+const unifiedFileInputEl = document.getElementById('unifiedFileInput');
+unifiedDropZone.addEventListener('click', () => unifiedFileInputEl.click());
+unifiedDropZone.addEventListener('dragover', e => { e.preventDefault(); unifiedDropZone.classList.add('drag-over'); });
+unifiedDropZone.addEventListener('dragleave', () => unifiedDropZone.classList.remove('drag-over'));
+unifiedDropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  unifiedDropZone.classList.remove('drag-over');
+  addFilesToUploadQueue(Array.from(e.dataTransfer.files || []));
+});
+unifiedFileInputEl.addEventListener('change', e => {
+  addFilesToUploadQueue(Array.from(e.target.files || []));
+  unifiedFileInputEl.value = '';
+});
+
+// ── STEP 1 DROP ZONE (Xero export → chart of accounts + coding history) ─────
+const xeroExportDropZone = document.getElementById('xeroExportDropZone');
+const xeroExportFileInputEl = document.getElementById('xeroExportFileInput');
+xeroExportDropZone.addEventListener('click', () => xeroExportFileInputEl.click());
+xeroExportDropZone.addEventListener('dragover', e => { e.preventDefault(); xeroExportDropZone.classList.add('drag-over'); });
+xeroExportDropZone.addEventListener('dragleave', () => xeroExportDropZone.classList.remove('drag-over'));
+xeroExportDropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  xeroExportDropZone.classList.remove('drag-over');
+  handleXeroExportFiles(e.dataTransfer.files);
+});
+xeroExportFileInputEl.addEventListener('change', e => {
+  handleXeroExportFiles(e.target.files);
+  xeroExportFileInputEl.value = '';
+});
+
+// ── DUPLICATE FILE DETECTION ────────────────────────────────────────────────
+// Hashes each file's actual content (SHA-256), not just its name — catches
+// the same PDF/template dropped twice even if it was renamed or re-exported.
+// Checked against every file already imported this session AND every other
+// file currently sitting in the queue. Flagged files are excluded from
+// processing by default; "Include anyway" lets you override a false positive.
+const importedFileHashes = new Map(); // hash -> { name, addedCount }
+
+async function computeFileHash(file) {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function addFilesToUploadQueue(files) {
+  const newItems = files.map(file => ({
+    id: uploadQueueIdCounter++, file, status: 'queued', error: null,
+    addedCount: null, hash: null, duplicateOf: null
+  }));
+  uploadQueue.push(...newItems);
+  renderUploadFileList();
+
+  for (const item of newItems) {
+    try {
+      item.hash = await computeFileHash(item.file);
+      const priorImport = importedFileHashes.get(item.hash);
+      const priorInQueue = uploadQueue.find(q => q.id !== item.id && q.hash === item.hash);
+      if (priorImport) {
+        item.status = 'duplicate';
+        item.duplicateOf = `Same content already imported as "${priorImport.name}" (${priorImport.addedCount ?? '?'} rows added).`;
+      } else if (priorInQueue) {
+        item.status = 'duplicate';
+        item.duplicateOf = `Same content as "${priorInQueue.file.name}", already in this batch.`;
+      }
+    } catch (e) {
+      // Hashing unsupported/failed (e.g. non-secure context) — don't block the
+      // file over it, just skip duplicate detection for this one.
+    }
+    renderUploadFileList();
+  }
+}
+
+function uploadFileKind(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'xlsx' || ext === 'xls') return 'xlsx';
+  if (ext === 'msg') return 'msg';
+  if (ext === 'pdf') return 'pdf';
+  if (['png','jpg','jpeg'].includes(ext)) return 'image';
+  if (ext === 'csv') return 'bankcsv';
+  return 'unknown';
+}
+
+function includeAnyway(id) {
+  const item = uploadQueue.find(q => q.id === id);
+  if (!item) return;
+  item.status = 'queued';
+  item.duplicateOf = null;
+  renderUploadFileList();
+}
+
+function renderUploadFileList() {
+  const list = document.getElementById('unifiedFileList');
+  list.innerHTML = '';
+  uploadQueue.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'raw-file-item';
+    let statusHtml = '';
+    if (item.status === 'queued') statusHtml = `<span class="fstatus queued">Queued</span>`;
+    else if (item.status === 'duplicate') statusHtml = `<span class="fstatus duplicate">Possible duplicate</span>`;
+    else if (item.status === 'working') statusHtml = `<span class="fstatus working">Processing…</span>`;
+    else if (item.status === 'done') statusHtml = `<span class="fstatus done">${item.addedCount!==null ? item.addedCount+' row'+(item.addedCount!==1?'s':'') : 'done'}</span>`;
+    else if (item.status === 'failed') statusHtml = `<span class="fstatus failed" title="${(item.error||'').replace(/"/g,'&quot;')}">Failed</span>`;
+    div.innerHTML = `<span class="fname">${item.file.name}</span>${statusHtml}`;
+    if (item.status === 'duplicate') {
+      const inc = document.createElement('button');
+      inc.type = 'button'; inc.className = 'include-anyway';
+      inc.textContent = 'Include anyway';
+      inc.addEventListener('click', () => includeAnyway(item.id));
+      div.appendChild(inc);
+    }
+    const rm = document.createElement('button');
+    rm.className = 'fremove'; rm.type = 'button'; rm.innerHTML = '&times;';
+    rm.title = 'Remove from queue';
+    rm.addEventListener('click', () => { uploadQueue = uploadQueue.filter(q => q.id !== item.id); renderUploadFileList(); });
+    div.appendChild(rm);
+    if (item.status === 'duplicate' && item.duplicateOf) {
+      const note = document.createElement('div');
+      note.className = 'dup-note';
+      note.textContent = item.duplicateOf;
+      div.appendChild(note);
+    }
+    list.appendChild(div);
+  });
+  refreshProcessAllBtn();
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Builds the extraction system prompt from this tool's own chart of accounts
+// and default VAT rates (ACCOUNTS / VAT_DEFAULTS above), so the model is
+// grounded in exactly the same coding conventions the manual dropdowns use —
+// not a generic "guess a category" prompt.
+function buildChartOfAccountsText() {
+  if (!ACCOUNTS.length) {
+    return '(No chart of accounts has been set up for this client yet — leave "accountCode" null for every line item; the user will code accounts manually.)';
+  }
+  return ACCOUNTS.map(a => {
+    const vat = VAT_DEFAULTS[a.code] || 'No VAT';
+    return `${a.code} - ${a.name} (default VAT: ${vat})`;
+  }).join('\n');
+}
+
+function buildChambersExtractionSystemPrompt() {
+  const coaText = buildChartOfAccountsText();
+
+  return `You are extracting expense line items from a document for a UK barrister's self-assessment bookkeeping, for import into a Xero-style expense tracker.
+
+The document may be a chambers invoice (rent, subscriptions, CPD, IT, professional fees etc. charged to the barrister), a credit note, a supplier receipt, or a scanned expense document. It is NOT a client fee/payment summary — ignore any fee income or case-payment content if present and extract only chargeable expense line items.
+
+CHART OF ACCOUNTS (choose the single best-fit code per line item; use the exact code shown):
+${coaText}
+
+RULES:
+- Extract every distinct chargeable line item as its own row, even if several appear on one invoice (e.g. "Chambers rent" and "CPD contribution" on the same chambers statement are two separate rows).
+- Use the account's default VAT rate shown above unless the document explicitly states a different rate for that line (e.g. a line marked "Exempt" or "Zero Rated" on the document itself).
+- "supplier" should be the chambers name, or the supplier/payee shown on the invoice.
+- "description" should be a short factual description of the line item (e.g. "Chambers rent - March 2026", "CPD subscription").
+- "amount" must be the GROSS amount shown for that line, as a plain number (no currency symbols, no commas).
+- "date" should be the invoice date or line-item date in YYYY-MM-DD format; if only a period/month is given, use the last day of that period.
+- Set "businessUsePercent" only if the additional instructions below specify a business-use percentage that applies to this line item (e.g. "motor expenses at 50% business use"); otherwise leave it null (100% business use, the normal case).
+- Never invent or estimate a figure that is not visible in the document. If a value is illegible or missing, set it to null and explain in "issues" — do not fabricate a plausible-looking number.
+- Set "confidence" to "high" if the account code, VAT rate, and amount are all clearly stated on the document; "medium" if you had to infer any of them; "low" if you are guessing at any of them.${extraInstructionsBlock()}
+
+OUTPUT FORMAT — respond with ONLY a JSON array. No markdown, no preamble, no code fences, no explanation before or after. If nothing extractable is found, return [].
+
+Each element of the array:
+{
+  "date": "YYYY-MM-DD" or null,
+  "accountCode": "<one of the codes above>" or null,
+  "vatRate": "<one of: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT>",
+  "supplier": "<string>" or null,
+  "description": "<string>",
+  "amount": <number> or null,
+  "businessUsePercent": <number 0-100> or null,
+  "confidence": "high" | "medium" | "low",
+  "issues": "<string, empty if none>"
+}`;
+}
+
+async function buildRawMessageContent(file, kind) {
+  const b64 = await readFileAsBase64(file);
+  if (kind === 'pdf') {
+    return [
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+      { type: 'text', text: `The above PDF is the source document "${file.name}". Extract every chargeable expense line item per the instructions.` }
+    ];
+  }
+  if (kind === 'image') {
+    const mediaType = file.type || (file.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg');
+    return [
+      { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } },
+      { type: 'text', text: `The above image is the source document "${file.name}". Extract every chargeable expense line item per the instructions.` }
+    ];
+  }
+  throw new Error('Unsupported file type — use PDF, PNG, or JPG');
+}
+
+function stripJsonFences(text) {
+  return text.replace(/```json/gi, '').replace(/```/g, '').trim();
+}
+
+// The system prompt says "respond with ONLY a JSON array", but models sometimes
+// add a short conversational preamble anyway — grabbing the substring between
+// the first "[" and the last "]" is more robust than assuming the whole
+// response is pure JSON.
+function extractJsonArray(text) {
+  const cleaned = stripJsonFences(text);
+  const start = cleaned.indexOf('[');
+  const end = cleaned.lastIndexOf(']');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`No JSON array found in model response. Response started: "${cleaned.slice(0,150)}"`);
+  }
+  return cleaned.slice(start, end + 1);
+}
+
+// Same defensive extraction as extractJsonArray, but for a JSON object
+// response (used by the Xero lookup, which returns {organisationName, items}
+// rather than a bare array).
+function extractJsonObject(text) {
+  const cleaned = stripJsonFences(text);
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`No JSON object found in model response. Response started: "${cleaned.slice(0,150)}"`);
+  }
+  return cleaned.slice(start, end + 1);
+}
+
+async function callChambersExtraction(file, kind) {
+  const { sample } = await getCaps();
+  if (!sample) throw new Error('Asking Claude is not available in this view.');
+
+  if (kind === 'pdf') {
+    // The published-page `sample` capability can send images to Claude but
+    // not PDF documents (that raw-API "document" content block has no
+    // equivalent here) — ask for an image instead rather than silently
+    // failing or guessing at an unsupported shape.
+    throw new Error('PDF extraction isn\'t available in the published version of this tool — please export/screenshot the page(s) as PNG or JPG and upload that instead, or use "Process Xero export" / paste it into the email box.');
+  }
+  if (kind !== 'image') throw new Error('Unsupported file type — use PNG or JPG');
+
+  const limits = await sample.limits().catch(() => null);
+  if (!limits || !limits.images) {
+    throw new Error('This view cannot send images to Claude.');
+  }
+
+  const prompt = `${buildChambersExtractionSystemPrompt()}\n\nThe attached image is the source document "${file.name}". Extract every chargeable expense line item per the instructions, and respond with ONLY the JSON array.`;
+  let parsed;
+  try {
+    parsed = await sample.json(prompt, { images: file, modelTier: 'default', cache: false });
+  } catch (e) {
+    if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
+    if (e && e.code === 'images_unavailable') throw new Error('This view cannot send images to Claude.');
+    if (e && e.code === 'image_rejected') throw new Error('That image could not be used — try a smaller PNG/JPG.');
+    throw new Error(sampleErrorMessage(e));
+  }
+  if (!Array.isArray(parsed)) throw new Error('Model response was not a JSON array');
+  return parsed;
+}
+
+// Maps a model-extracted row onto this tool's own row shape (same shape addRow
+// already expects from the .xlsx importer and the email parser), matching the
+// account code back to the ACCOUNTS list so it renders as a normal dropdown
+// selection rather than free text. Confidence and any model-flagged issues are
+// folded into the description as a bracketed note — this keeps the existing
+// "needs-attention" highlighting meaningful (a row with a matched account/VAT
+// but low AI confidence still reads as something to check) without touching
+// the fixed table column layout.
+function mapChambersRowToInternal(aiRow) {
+  const found = aiRow.accountCode ? ACCOUNTS.find(a => a.code === String(aiRow.accountCode)) : null;
+  const accFull = found ? `${found.code} - ${found.name}` : '';
+  const modelVatExplicit = VAT_RATES.includes(aiRow.vatRate) ? aiRow.vatRate : null;
+  const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
+  const vat = supplierVatOverride(aiRow.supplier) || modelVat;
+
+  let desc = aiRow.description || '';
+  if (aiRow.confidence && aiRow.confidence !== 'high') {
+    desc += ` [AI ${aiRow.confidence} confidence — verify]`;
+  }
+  if (aiRow.issues) {
+    desc += ` [${aiRow.issues}]`;
+  }
+  // Only a high-confidence read (model states account/VAT/amount were all
+  // clearly stated on the document) counts as real signal to check against
+  // history and worth remembering — a medium/low guess shouldn't feed into
+  // shared history for every other client's job.
+  if (accFull && modelVatExplicit) {
+    desc += checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, aiRow.supplier, aiRow.description);
+    if (aiRow.confidence === 'high') recordClientRule(aiRow.supplier, aiRow.description, accFull, modelVatExplicit);
+  }
+
+  // A business-use percentage the model set because of a custom instruction
+  // (e.g. "motor expenses at 50% business use") — never applied to Use of
+  // Home rows, which have their own % mechanism via the home calculator.
+  let bu = '';
+  if (aiRow.businessUsePercent !== null && aiRow.businessUsePercent !== undefined && aiRow.businessUsePercent !== '' && !isHome213(accFull)) {
+    const pct = Number(aiRow.businessUsePercent);
+    if (!isNaN(pct)) {
+      bu = Math.max(0, Math.min(100, pct));
+      desc += ` [AI set business use to ${bu}% per your instructions — verify]`;
+    }
+  }
+
+  return {
+    post: 'YES',
+    acc: accFull,
+    vat: vat,
+    ref: '',
+    date: aiRow.date || '',
+    supplier: aiRow.supplier || '',
+    desc: desc,
+    gross: (aiRow.amount === null || aiRow.amount === undefined) ? '' : Number(aiRow.amount),
+    bu: bu,
+    home: false,
+  };
+}
+
+// ── BANK STATEMENT CSV (raw current-account export) ─────────────────────────
+// A raw bank statement export — e.g. a business current account CSV/download
+// with columns like Date/Type/Description/Value/Balance — is fundamentally
+// different from the other unified-upload sources: it's a full transaction
+// history of the account (money in AND money out), not a pre-filtered list
+// of chargeable expenses. So this path is deliberately more cautious than
+// the chambers/email extraction above: every transaction is still added as a
+// row (nothing is silently dropped), but incoming money and anything that
+// looks personal (drawings, transfers to the owner, personal card
+// repayments, HMRC self-assessment, etc.) is excluded (post:'NO') by default
+// rather than assumed to be a business expense — the accountant reviews and
+// flips "post" to YES for anything that should go in after all. Read as
+// plain text and sent to the model the same way the Xero-export chart of
+// accounts reader does (extractTextFromXeroExport / callXeroFileExtraction
+// above), reusing the same chunking helpers for large statements.
+
+const BANK_STATEMENT_TEXT_LIMIT = 50000; // headroom under the 64KB sample() prompt cap
+const MAX_BANK_STATEMENT_CHUNKS = 10;    // safety cap on AI calls for one statement
+
+function buildBankStatementExtractionSystemPrompt() {
+  const coaText = buildChartOfAccountsText();
+  return `You are reading a raw bank/current-account statement export (CSV) for a UK self-employed professional's bookkeeping, for import into a Xero-style expense tracker. It is NOT a pre-filtered expense list — it is every transaction on the account, both money in and money out, usually with columns similar to Date, Type (e.g. POS, D/D, DPC, BAC, CHG), Description, Value (signed amount), Balance. Column names and order can vary by bank; work out the shape from whatever header row or pattern is present.
+
+Extract EVERY transaction line as its own row — do not skip or merge any, and do not filter anything out yourself (the tool marks things for exclusion afterwards, you just report them accurately).
+
+CHART OF ACCOUNTS (choose the single best-fit code only if you are confident which business expense category a transaction belongs to; use the exact code shown; leave accountCode null if unsure or if the chart is empty):
+${coaText}
+
+For each transaction:
+- "date" in YYYY-MM-DD format.
+- "payee" — the cleaned-up merchant/counterparty name (strip card masks, transaction reference numbers, and boilerplate like "VIA MOBILE - PYMT" or "FP dd/mm/yy" down to the actual person/company), or null if genuinely just a bank charge/fee with no counterparty.
+- "description" — a short, cleaned description of what the transaction actually was, in plain English (e.g. "Card payment — Vodafone mobile bill", "Direct debit — Barclaycard", "Bank charges").
+- "amount" — the transaction amount as a positive number (no currency symbols, no commas, no sign).
+- "direction" — "out" if money left the account (a debit/payment), "in" if money was received (a credit/deposit).
+- "accountCode" as above, or null.
+- "vatRate" — one of: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT — only if confidently known from the account chosen, else null.
+- "likelyNonBusiness" — true if this transaction is very likely NOT a business expense/income line that belongs in the accounts at all: transfers to the account holder themselves or a joint/personal account (e.g. "drawings", payments to a personal name with no clear business purpose), personal credit card repayments, HMRC self-assessment payments, loan/mortgage repayments on a personal basis, or anything that reads as the owner moving their own money around rather than the business trading. Genuine business expenses (subscriptions, suppliers, professional fees, bank charges, business rates, etc.) and genuine business income (client/customer payments) should be false.
+- "confidence" — "high" if the transaction is unambiguous, "medium" if you had to infer the nature of it, "low" if you are largely guessing.
+- "issues" — a short note if anything is unclear or worth flagging, empty string otherwise.
+
+Never invent a figure that is not visible in the data.${extraInstructionsBlock()}
+
+OUTPUT — respond with ONLY a JSON array, one element per transaction line, in the same order they appear. No markdown, no preamble, no code fences, no explanation before or after. If nothing extractable is found, return [].
+
+Each element:
+{
+  "date": "YYYY-MM-DD" or null,
+  "payee": "<string>" or null,
+  "description": "<string>",
+  "amount": <number>,
+  "direction": "out" | "in",
+  "accountCode": "<one of the codes above>" or null,
+  "vatRate": "<one of the 5 categories above>" or null,
+  "likelyNonBusiness": true | false,
+  "confidence": "high" | "medium" | "low",
+  "issues": "<string, empty if none>"
+}`;
+}
+
+async function callBankStatementExtraction(text) {
+  const { sample } = await getCaps();
+  if (!sample) throw new Error('Asking Claude is not available in this view.');
+  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nHere is the bank statement data:\n\n${text}`;
+  let parsed;
+  try {
+    parsed = await sample.json(prompt, { modelTier: 'default', cache: false });
+  } catch (e) {
+    if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
+    throw new Error(sampleErrorMessage(e));
+  }
+  if (!Array.isArray(parsed)) throw new Error('Model response was not a JSON array');
+  return parsed;
+}
+
+// Maps one extracted bank transaction onto this tool's row shape. Unlike
+// mapChambersRowToInternal, this defaults "post" to NO for anything that
+// isn't a confident, business-flavoured outgoing payment — money in and
+// anything flagged likelyNonBusiness still gets added (so nothing from the
+// statement is hidden), just excluded from export until reviewed.
+function mapBankRowToInternal(t) {
+  const direction = t.direction === 'in' ? 'in' : 'out';
+  const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
+  const accFull = found ? `${found.code} - ${found.name}` : '';
+  const modelVatExplicit = VAT_RATES.includes(t.vatRate) ? t.vatRate : null;
+  const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
+  const vat = supplierVatOverride(t.payee) || modelVat;
+
+  let desc = t.description || '';
+  if (direction === 'in') desc += ' [Money in — review before including as an expense]';
+  if (t.likelyNonBusiness) desc += ' [Possibly personal / non-business — review]';
+  if (t.confidence && t.confidence !== 'high') desc += ` [AI ${t.confidence} confidence — verify]`;
+  if (t.issues) desc += ` [${t.issues}]`;
+
+  if (accFull && modelVatExplicit) {
+    desc += checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, t.payee, t.description);
+    if (t.confidence === 'high' && direction === 'out' && !t.likelyNonBusiness) {
+      recordClientRule(t.payee, t.description, accFull, modelVatExplicit);
+    }
+  }
+
+  const excluded = direction === 'in' || !!t.likelyNonBusiness;
+
+  return {
+    post: excluded ? 'NO' : 'YES',
+    acc: accFull,
+    vat: vat,
+    ref: '',
+    date: t.date || '',
+    supplier: t.payee || '',
+    desc: desc,
+    gross: (t.amount === null || t.amount === undefined || isNaN(Number(t.amount))) ? '' : Math.abs(Number(t.amount)),
+    bu: '',
+    home: false,
+    direction: direction,
+  };
+}
+
+// Reads a dropped bank statement CSV as plain text, chunks it (same
+// line-safe chunking as the Xero-export reader) so a full year of
+// transactions doesn't blow the sample() prompt cap, and adds every
+// extracted transaction as a row via addRow()/mapBankRowToInternal.
+// `onProgress`, if given, is called with a short status string between chunks.
+async function parseBankStatementCsvFile(file, onProgress) {
+  const text = await readFileAsPlainText(file);
+  let chunks = chunkTextByLines(text, BANK_STATEMENT_TEXT_LIMIT);
+  let capped = false;
+  if (chunks.length > MAX_BANK_STATEMENT_CHUNKS) {
+    chunks = chunks.slice(0, MAX_BANK_STATEMENT_CHUNKS);
+    capped = true;
+  }
+  let added = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress(`Reading ${file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`);
+    const aiRows = await callBankStatementExtraction(chunks[i]);
+    aiRows.forEach(r => addRow(mapBankRowToInternal(r)));
+    added += aiRows.length;
+  }
+  if (capped) {
+    setAlert(`"${file.name}" is a large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS} sections were read. Check totals against the original, or split it and drop in the rest separately.`, 'warn');
+  }
+  return added;
+}
+
+// Processes every queued file in order, routing by type:
+//  - .xlsx/.xls            -> the existing template importer
+//  - .msg                  -> extracts the email body, then the same AI email parser
+//  - .pdf/.png/.jpg/.jpeg  -> AI chambers-bill extraction against this tool's own COA
+//  - .csv                  -> AI bank-statement transaction extraction (see above)
+// All five paths append rows rather than resetting the table (see parseFile's
+// own note), so dropping in a second or third month's file for the same
+// client just keeps adding — "Clear all" below the table is there if a full
+// reset is ever wanted instead.
+async function processUnifiedQueue() {
+  const statusEl = document.getElementById('unifiedStatus');
+  // Defensive reload — covers the case where the client name was typed and
+  // files dropped straight in without the field ever losing focus.
+  const nameNow = document.getElementById('clientName').value.trim();
+  if (nameNow !== currentClientKey) await loadClientRules();
+  const toProcess = uploadQueue.filter(q => q.status === 'queued');
+  let done = 0;
+  for (const item of toProcess) {
+    item.status = 'working';
+    renderUploadFileList();
+    statusEl.textContent = `Processing ${item.file.name} (${done+1}/${toProcess.length})…`;
+    const kind = uploadFileKind(item.file);
+    try {
+      if (kind === 'xlsx') {
+        item.addedCount = await parseFile(item.file);
+      } else if (kind === 'msg') {
+        item.addedCount = await parseMsgFile(item.file);
+      } else if (kind === 'pdf' || kind === 'image') {
+        const aiRows = await callChambersExtraction(item.file, kind);
+        aiRows.forEach(r => addRow(mapChambersRowToInternal(r)));
+        item.addedCount = aiRows.length;
+      } else if (kind === 'bankcsv') {
+        item.addedCount = await parseBankStatementCsvFile(item.file, (msg) => {
+          statusEl.textContent = msg;
+        });
+      } else {
+        throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, or .csv');
+      }
+      item.status = 'done';
+      if (item.hash) importedFileHashes.set(item.hash, { name: item.file.name, addedCount: item.addedCount });
+    } catch(e) {
+      item.status = 'failed';
+      item.error = e.message || String(e);
+    }
+    done++;
+    renderUploadFileList();
+  }
+  showTable();
+  checkHomeRows();
+  statusEl.textContent = `Done — processed ${done} file${done!==1?'s':''}.`;
+}
+
+// ── COMBINED "Process files & email" BUTTON ─────────────────────────────────
+// One button below the notes box runs whichever of the two sources above
+// actually has something queued: files waiting in the drop-zone queue,
+// pasted email text, or both. Each source's own status line (unifiedStatus /
+// emailStatus) still reports its own progress; this button's status line
+// gives the overall outcome.
+function setProcessAllStatus(msg, type) {
+  const el = document.getElementById('processAllStatus');
+  const colours = { info: 'var(--text-muted)', success: 'var(--green)', warn: 'var(--amber)' };
+  el.style.color = colours[type] || 'var(--text-muted)';
+  el.textContent = msg;
+}
+
+function refreshProcessAllBtn() {
+  const btn = document.getElementById('processAllBtn');
+  if (!btn) return;
+  const hasQueuedFiles = uploadQueue.some(q => q.status === 'queued');
+  const hasEmailText = document.getElementById('emailPasteBox').value.trim().length > 0;
+  btn.disabled = !hasQueuedFiles && !hasEmailText;
+}
+
+async function processAll() {
+  const btn = document.getElementById('processAllBtn');
+  const hasQueuedFiles = uploadQueue.some(q => q.status === 'queued');
+  const hasEmailText = document.getElementById('emailPasteBox').value.trim().length > 0;
+
+  if (!hasQueuedFiles && !hasEmailText) {
+    setProcessAllStatus('Add a file above or paste some email text first.', 'warn');
+    return;
+  }
+
+  btn.disabled = true;
+  const before = rows.length;
+
+  if (hasQueuedFiles) {
+    setProcessAllStatus('Processing files…', 'info');
+    await processUnifiedQueue();
+  }
+  if (hasEmailText) {
+    setProcessAllStatus('Extracting expenses from email…', 'info');
+    await parseEmail();
+  }
+
+  const addedTotal = rows.length - before;
+  setProcessAllStatus(`✓ Done — ${addedTotal} row${addedTotal!==1?'s':''} added.`, 'success');
+  refreshProcessAllBtn();
+}
+
+function addRow(data) {
+  const id = nextId++;
+  const d = data || {};
+  const vatOverride = supplierVatOverride(d.supplier);
+  let acc = d.acc || '';
+  let vat = vatOverride || d.vat || '';
+  let desc = d.desc || '';
+
+  // Nothing came in coded (no account) — check this client's history before
+  // leaving it blank. Only fires on genuinely blank rows, so it never
+  // overrides a value that's already come from the file, AI extraction, or
+  // a manual edit.
+  if (!acc) {
+    const learned = lookupClientRule(d.supplier, d.desc);
+    if (learned && learned.acc) {
+      acc = learned.acc;
+      if (!vatOverride) vat = learned.vat || vat;
+      desc += ' [matches how this client is usually coded — verify]';
+    }
+  }
+
+  rows.push({
+    id,
+    post: d.post || 'YES',
+    acc,
+    vat,
+    ref: d.ref || '',
+    date: d.date || '',
+    supplier: d.supplier || '',
+    desc,
+    gross: d.gross !== undefined ? d.gross : '',
+    bu: d.bu || '',
+    home: d.home || false,
+    // 'out' (money leaving the account, the normal case for every existing
+    // source — templates, chambers bills, emails) or 'in' (money received),
+    // only ever set to 'in' by the bank-statement CSV path above. Used only
+    // by buildBankCSVData to sign the exported amount correctly.
+    direction: d.direction === 'in' ? 'in' : 'out',
+    _selected: false,
+  });
+  renderRow(rows[rows.length-1]);
+  updateUI();
+}
+
+function addBlankRow() {
+  addRow({});
+  showTable();
+  const newRow = rows[rows.length - 1];
+  const tr = document.getElementById('tr_' + newRow.id);
+  if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function removeRow(id) {
+  rows = rows.filter(r => r.id !== id);
+  const el = document.getElementById('tr_'+id);
+  if (el) el.remove();
+  updateUI();
+  if (rows.length === 0) {
+    document.getElementById('expTable').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'block';
+  }
+}
+
+// ── MERGE SELECTED ROWS ─────────────────────────────────────────────────────
+// Some chambers bills come through the AI extraction as several line items
+// (rent, CPD, IT, etc. each as their own row) when a single combined total
+// is actually all that's wanted. Ticking the small checkbox on each row to
+// merge and clicking "Merge selected rows" collapses them into one row: the
+// gross amounts are summed, and account/VAT/supplier are kept only if every
+// selected row agrees — otherwise they're left blank and flagged in the
+// description for a manual decision, rather than guessing which one wins.
+
+function toggleRowSelect(id, checked) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row._selected = checked;
+  updateMergeButton();
+}
+
+function updateMergeButton() {
+  const btn = document.getElementById('mergeRowsBtn');
+  if (!btn) return;
+  const n = rows.filter(r => r._selected).length;
+  btn.disabled = n < 2;
+  btn.textContent = n >= 2 ? `Merge selected rows (${n})` : 'Merge selected rows';
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+function mergeSelectedRows() {
+  const selected = rows.filter(r => r._selected);
+  if (selected.length < 2) return;
+
+  // Read live DOM values rather than the `rows` array directly — an edit
+  // that hasn't lost focus yet (no blur/change fired) wouldn't otherwise be
+  // reflected, same pattern the CSV export functions already rely on.
+  const live = selected.map(r => {
+    const grossEl = document.querySelector(`#tr_${r.id} input[type=number]`);
+    const descEl  = document.querySelector(`#tr_${r.id} td:nth-child(7) input`);
+    const supEl   = document.querySelector(`#tr_${r.id} td:nth-child(6) input`);
+    const dateEl  = document.querySelector(`#tr_${r.id} input[type=date]`);
+    const refEl   = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
+    const accEl   = document.querySelector(`#tr_${r.id} td:nth-child(2) select`);
+    const vatEl   = document.querySelector(`#tr_${r.id} td:nth-child(3) select`);
+    return {
+      gross: parseFloat(grossEl?.value ?? r.gross) || 0,
+      desc: (descEl?.value ?? r.desc) || '',
+      supplier: (supEl?.value ?? r.supplier) || '',
+      date: (dateEl?.value ?? r.date) || '',
+      ref: (refEl?.value ?? r.ref) || '',
+      acc: (accEl?.value ?? r.acc) || '',
+      vat: (vatEl?.value ?? r.vat) || '',
+    };
+  });
+
+  const totalGross = round2(live.reduce((s, r) => s + r.gross, 0));
+  const allSameAcc = !!live[0].acc && live.every(r => r.acc === live[0].acc);
+  const allSameVat = !!live[0].vat && live.every(r => r.vat === live[0].vat);
+  const allSameSupplier = !!live[0].supplier && live.every(r => r.supplier === live[0].supplier);
+
+  const descParts = live.map(r => r.desc).filter(Boolean);
+  let mergedDesc = descParts.length
+    ? `Merged (${live.length} lines): ${descParts.join('; ')}`
+    : `Merged total of ${live.length} lines`;
+  if (!allSameAcc) mergedDesc += ' [mixed accounts — confirm]';
+  if (!allSameVat) mergedDesc += ' [mixed VAT rates — confirm]';
+
+  const earliestDate = live.map(r => r.date).filter(Boolean).sort()[0] || '';
+  const firstRef = live.map(r => r.ref).filter(Boolean)[0] || '';
+  const mergedSupplier = allSameSupplier
+    ? live[0].supplier
+    : [...new Set(live.map(r => r.supplier).filter(Boolean))].join(' / ');
+
+  const mergedData = {
+    post: 'YES',
+    acc: allSameAcc ? live[0].acc : '',
+    vat: allSameVat ? live[0].vat : '',
+    ref: firstRef,
+    date: earliestDate,
+    supplier: mergedSupplier,
+    desc: mergedDesc,
+    gross: totalGross,
+    bu: '',
+    home: false,
+  };
+
+  // Remove the originals first so the merged row lands cleanly at the end
+  // rather than in the gap they left behind.
+  selected.forEach(r => removeRow(r.id));
+  addRow(mergedData);
+  showTable();
+  checkHomeRows();
+}
+
+function renderRow(row) {
+  const tbody = document.getElementById('expBody');
+  const tr = document.createElement('tr');
+  tr.id = 'tr_' + row.id;
+  if (row.post === 'NO') tr.classList.add('excluded');
+  if (!row.acc || !row.vat) tr.classList.add('needs-attention');
+  tr.innerHTML = buildRowHTML(row);
+  tbody.appendChild(tr);
+}
+
+function buildRowHTML(row) {
+  const id = row.id;
+  const gross = row.gross !== '' ? parseFloat(row.gross) : 0;
+  const net = calcNet(gross, row.bu, row.home, row.acc, row.vat);
+  const netAdj = (isHome213(row.acc) || row.bu !== '' || row.home) && net !== gross;
+  const netStr = isNaN(net) ? '—' : `£${net.toFixed(2)}`;
+  const homeAdjApplies = isHome213(row.acc) && homeAdjustmentApplies(row.vat);
+  return `
+    <td class="no-strike" style="text-align:center;">
+      <input type="checkbox" class="row-select" onchange="toggleRowSelect(${id},this.checked)" ${row._selected ? 'checked' : ''} title="Select rows to merge into one">
+    </td>
+    <td><select onchange="onAccChange(${id},this.value)">${accOptions(row.acc)}</select></td>
+    <td><select onchange="onVatChange(${id},this.value)">${vatOptions(row.vat)}</select></td>
+    <td><input type="text" value="${esc(row.ref)}" onchange="setField(${id},'ref',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Ref"></td>
+    <td><input type="date" value="${row.date||''}" onchange="setField(${id},'date',this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+    <td><input type="text" value="${esc(row.supplier)}" onchange="setField(${id},'supplier',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Supplier"></td>
+    <td><input type="text" value="${esc(row.desc)}" onchange="setField(${id},'desc',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Description"></td>
+    <td><input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"></td>
+    <td class="no-strike">
+      <div class="bu-cell">
+        <input type="number" min="0" max="100" step="1" value="${isHome213(row.acc) ? '' : (row.bu!==''?row.bu:'')}"
+          onchange="setField(${id},'bu',this.value);propagateBU(${id},this.value);updateNet(${id})"
+          onkeyup="updateNet(${id})"
+          onkeydown="if(event.key==='Enter')this.blur()"
+          placeholder="${isHome213(row.acc) ? '—' : '100'}"
+          ${isHome213(row.acc) ? 'disabled style="opacity:0.35;cursor:not-allowed"' : ''}>
+        <span class="bu-suffix">${isHome213(row.acc) ? '' : '%'}</span>
+      </div>
+    </td>
+    <td class="no-strike">
+      ${isHome213(row.acc)
+        ? `<span class="use-home-btn active${homeAdjApplies ? '' : ' unadjusted'}" style="cursor:default;opacity:0.85" title="${homeAdjApplies ? 'Home proportion applied automatically: ' + getHomePct().toFixed(2) + '% of gross' : 'VAT rate is not 5% or 20% — Use of Home figure kept at full gross amount (no proportion applied)'}">${homeAdjApplies ? '⌂ AUTO' : '⌂ FULL'}</span>`
+        : `<button class="use-home-btn${row.home?' active':''}" id="homeBtn_${id}" onclick="toggleHome(${id})" title="${row.home ? 'Applying ' + getHomePct().toFixed(2) + '% (from the Use of Home calculator above) — click to remove' : 'Click to apply the Use of Home business proportion (' + getHomePct().toFixed(2) + '%, set in the calculator above) to this row'}">${row.home?'⌂ ON':'⌂'}</button>`
+      }
+    </td>
+    <td class="no-strike">
+      <div class="net-amt${netAdj?' adjusted':''}\" id="net_${id}">${netStr}</div>
+    </td>
+    <td class="no-strike">
+      <button class="del-row" onclick="removeRow(${id})">×</button>
+    </td>
+  `;
+}
+
+function esc(s) {
+  return String(s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+function setField(id, field, val) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row[field] = val;
+  if (field === 'supplier') {
+    const override = supplierVatOverride(val);
+    if (override && override !== row.vat) {
+      row.vat = override;
+      const tr = document.getElementById('tr_'+id);
+      if (tr) {
+        tr.innerHTML = buildRowHTML(row);
+        if (row.acc && row.vat) tr.classList.remove('needs-attention');
+      }
+      updateSummary();
+      refreshExportBtn();
+      return;
+    }
+  }
+  if (field === 'vat' || field === 'acc') {
+    const tr = document.getElementById('tr_'+id);
+    if (tr && row.acc && row.vat) tr.classList.remove('needs-attention');
+  }
+  updateSummary();
+  refreshExportBtn();
+}
+
+function propagateBU(id, val) {
+  const source = rows.find(r => r.id === id);
+  if (!source) return;
+  if (isHome213(source.acc)) return; // Use of Home rows don't use % BU — the home calculator handles those
+  const supplier = (source.supplier || '').trim().toLowerCase();
+  if (!supplier) return;
+
+  rows.forEach(r => {
+    if (r.id === id) return;
+    if (isHome213(r.acc)) return; // BU input is disabled for these rows
+    // Don't override if user has already manually broken this row free from BU propagation
+    if (propagatedRows.has(`manual_bu_${r.id}`)) return;
+    const supEl = document.querySelector(`#tr_${r.id} td:nth-child(6) input`);
+    const domSupplier = (supEl ? supEl.value : (r.supplier || '')).trim().toLowerCase();
+    if (domSupplier !== supplier) return;
+
+    const buEl = document.querySelector(`#tr_${r.id} .bu-cell input`);
+    const prevBu = buEl ? buEl.value : r.bu;
+    if (prevBu === val) return; // already the same, nothing to do or undo
+
+    // Apply same BU
+    r.bu = val;
+    if (buEl) buEl.value = val;
+    updateNet(r.id);
+    propagatedRows.add(`propagated_bu_${r.id}`);
+    showUndoPillBU(r.id, prevBu);
+  });
+}
+
+function showUndoPillBU(id, prevBu) {
+  const tr = document.getElementById('tr_'+id);
+  if (!tr) return;
+  const lastTd = tr.querySelector('td:last-child');
+  if (!lastTd) return;
+  const existing = document.getElementById('undoBu_'+id);
+  if (existing) existing.remove();
+  const pill = document.createElement('div');
+  pill.id = 'undoBu_'+id;
+  pill.style.cssText = 'font-size:10px;color:var(--blue);cursor:pointer;margin-top:3px;white-space:nowrap;text-decoration:underline;';
+  pill.textContent = 'undo % BU';
+  pill.title = 'Revert this row\'s % BU — keep editing independently';
+  pill.onclick = () => undoPropagateBU(id, prevBu);
+  lastTd.appendChild(pill);
+  setTimeout(() => { pill.remove(); propagatedRows.delete(`propagated_bu_${id}`); }, 8000);
+}
+
+function undoPropagateBU(id, prevBu) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.bu = prevBu;
+  propagatedRows.add(`manual_bu_${id}`);
+  propagatedRows.delete(`propagated_bu_${id}`);
+  const buEl = document.querySelector(`#tr_${id} .bu-cell input`);
+  if (buEl) buEl.value = prevBu;
+  updateNet(id);
+}
+
+function onAccChange(id, val) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.acc = val;
+  const dv = defaultVat(val);
+  if (dv) {
+    row.vat = dv;
+  }
+  const tr = document.getElementById('tr_'+id);
+  if (tr) {
+    tr.innerHTML = buildRowHTML(row);
+    if (!row.acc || !row.vat) tr.classList.add('needs-attention');
+    else tr.classList.remove('needs-attention');
+  }
+  if (row.acc && row.vat) recordClientRule(row.supplier, row.desc, row.acc, row.vat);
+  // Propagate acc+vat to rows with same description
+  propagateDescMatch(id, 'acc');
+  checkHomeRows();
+  updateSummary();
+  refreshExportBtn();
+}
+
+function onVatChange(id, val) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.vat = val;
+  const tr = document.getElementById('tr_'+id);
+  if (tr) {
+    tr.innerHTML = buildRowHTML(row);
+    if (row.acc && row.vat) tr.classList.remove('needs-attention');
+  }
+  if (row.acc && row.vat) recordClientRule(row.supplier, row.desc, row.acc, row.vat);
+  // Propagate vat to rows with same description
+  propagateDescMatch(id, 'vat');
+  updateSummary();
+  refreshExportBtn();
+}
+
+// Track rows that were auto-propagated so user can undo per-row
+const propagatedRows = new Set();
+
+function propagateDescMatch(sourceId, changedField) {
+  const source = rows.find(r => r.id === sourceId);
+  if (!source) return;
+  const descEl = document.querySelector(`#tr_${sourceId} td:nth-child(7) input`);
+  const desc = (descEl ? descEl.value : source.desc).trim().toLowerCase();
+  if (!desc) return;
+
+  rows.forEach(r => {
+    if (r.id === sourceId) return;
+    // Don't override if user has already manually broken this row free
+    if (propagatedRows.has(`manual_${r.id}`)) return;
+    const rDescEl = document.querySelector(`#tr_${r.id} td:nth-child(7) input`);
+    const rDesc = (rDescEl ? rDescEl.value : r.desc).trim().toLowerCase();
+    if (rDesc !== desc) return;
+
+    // Apply the change
+    r.acc = source.acc;
+    r.vat = source.vat;
+    propagatedRows.add(`propagated_${r.id}`);
+    const tr = document.getElementById('tr_'+r.id);
+    if (tr) {
+      tr.innerHTML = buildRowHTML(r);
+      if (!r.acc || !r.vat) tr.classList.add('needs-attention');
+      else tr.classList.remove('needs-attention');
+      // Add undo pill
+      showUndoPill(r.id, source.acc, source.vat);
+    }
+  });
+  checkHomeRows();
+}
+
+function showUndoPill(id, prevAcc, prevVat) {
+  const tr = document.getElementById('tr_'+id);
+  if (!tr) return;
+  // Inject a small undo notice into the last cell
+  const lastTd = tr.querySelector('td:last-child');
+  if (!lastTd) return;
+  const pill = document.createElement('div');
+  pill.id = 'undo_'+id;
+  pill.style.cssText = 'font-size:10px;color:var(--blue);cursor:pointer;margin-top:3px;white-space:nowrap;text-decoration:underline;';
+  pill.textContent = 'undo';
+  pill.title = 'Revert this row — keep editing independently';
+  pill.onclick = () => undoPropagate(id, prevAcc, prevVat);
+  lastTd.appendChild(pill);
+  // Auto-remove after 8 seconds
+  setTimeout(() => { pill.remove(); propagatedRows.delete(`propagated_${id}`); }, 8000);
+}
+
+function undoPropagate(id, prevAcc, prevVat) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.acc = prevAcc;
+  row.vat = prevVat;
+  // Mark as manually broken so future propagations skip it
+  propagatedRows.add(`manual_${id}`);
+  propagatedRows.delete(`propagated_${id}`);
+  const tr = document.getElementById('tr_'+id);
+  if (tr) {
+    tr.innerHTML = buildRowHTML(row);
+    if (!row.acc || !row.vat) tr.classList.add('needs-attention');
+    else tr.classList.remove('needs-attention');
+  }
+  checkHomeRows();
+  updateSummary();
+}
+
+function toggleHome(id) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.home = !row.home;
+  const btn = document.getElementById('homeBtn_'+id);
+  btn.className = 'use-home-btn' + (row.home?' active':'');
+  btn.textContent = row.home ? '⌂ ON' : '⌂';
+  checkHomeRows();
+  updateNet(id);
+  updateSummary();
+}
+
+// Name changed from the earlier hardcoded-code version, kept for the many
+// call sites already using it. Account codes are now client-specific and
+// learned rather than fixed, so this looks the row's account up in the
+// current client's chart of accounts and matches on its NAME instead of
+// assuming "213" is always Use of Home for every client.
+function isHome213(acc) {
+  const code = (acc || '').split(' - ')[0].trim();
+  if (!code) return false;
+  const entry = ACCOUNTS.find(a => a.code === code);
+  if (!entry) return false;
+  return /use of home|home as an office|home office/i.test(entry.name);
+}
+
+// The Use of Home (213) proportion adjustment should only be applied when the
+// VAT rate is one of the reclaimable rates (5%, 20%). For No VAT, Exempt,
+// or Zero Rated rows, the figure is kept at the full gross amount, unadjusted.
+const HOME_ADJUST_VAT_RATES = ['20% (VAT on Expenses)', '5% (VAT on Expenses)'];
+function homeAdjustmentApplies(vat) {
+  return HOME_ADJUST_VAT_RATES.includes(vat);
+}
+
+function calcNet(gross, bu, home, acc, vat) {
+  let amt = parseFloat(gross) || 0;
+  if (isHome213(acc)) {
+    if (homeAdjustmentApplies(vat)) {
+      amt = amt * (getHomePct() / 100);
+    }
+    // else: VAT rate isn't 5%/20% — leave the figure at the full gross amount
+  } else {
+    if (bu !== '' && bu !== null) {
+      const buPct = parseFloat(bu);
+      if (!isNaN(buPct)) amt = amt * (buPct / 100);
+    }
+    if (home) {
+      amt = amt * (getHomePct() / 100);
+    }
+  }
+  return amt;
+}
+
+function updateNet(id) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  // Read live values from DOM
+  const grossEl = document.querySelector(`#tr_${id} input[type=number]`);
+  if (grossEl) row.gross = grossEl.value;
+  const buEl = document.querySelector(`#tr_${id} .bu-cell input`);
+  if (buEl) row.bu = buEl.value;
+
+  const gross = parseFloat(row.gross) || 0;
+  const net = calcNet(gross, row.bu, row.home, row.acc, row.vat);
+  const netAdj = (isHome213(row.acc) || row.bu !== '' || row.home) && net !== gross;
+  const el = document.getElementById('net_'+id);
+  if (el) {
+    el.textContent = isNaN(net) ? '—' : `£${net.toFixed(2)}`;
+    el.className = 'net-amt' + (netAdj?' adjusted':'');
+  }
+  updateSummary();
+}
+
+// ── HOME CALC ────────────────────────────────────────────────────────────────
+
+let homeMethod = 'pct';
+
+function setHomeMethod(method) {
+  homeMethod = method;
+  document.getElementById('hcPctInputs').style.display   = method==='pct'   ? 'grid' : 'none';
+  document.getElementById('hcRoomsInputs').style.display = method==='rooms' ? 'grid' : 'none';
+  document.getElementById('btnPctMethod').classList.toggle('active',   method==='pct');
+  document.getElementById('btnRoomsMethod').classList.toggle('active', method==='rooms');
+  calcHome();
+}
+
+function getHomePct() {
+  if (homeMethod === 'pct') {
+    const homePct = parseFloat(document.getElementById('hcHomePct').value) || 0;
+    const timePct = parseFloat(document.getElementById('hcTimePctA').value) || 0;
+    return (homePct / 100) * timePct;
+  } else {
+    const work  = parseFloat(document.getElementById('hcWorkRooms').value) || 1;
+    const total = parseFloat(document.getElementById('hcRooms').value) || 1;
+    const timePct = parseFloat(document.getElementById('hcTimePctB').value) || 0;
+    return (work / total) * timePct;
+  }
+}
+
+function calcHome() {
+  const pct = getHomePct();
+
+  if (homeMethod === 'pct') {
+    const homePct = parseFloat(document.getElementById('hcHomePct').value) || 0;
+    const timePct = parseFloat(document.getElementById('hcTimePctA').value) || 0;
+    document.getElementById('homePctDisplay').textContent = pct.toFixed(2);
+    document.getElementById('hcEffectiveLine').textContent =
+      `Effective adjustment: ${homePct}% × ${timePct}% = ${pct.toFixed(2)}% of gross amount`;
+  } else {
+    const work  = parseFloat(document.getElementById('hcWorkRooms').value) || 1;
+    const total = parseFloat(document.getElementById('hcRooms').value) || 1;
+    const timePct = parseFloat(document.getElementById('hcTimePctB').value) || 0;
+    document.getElementById('homePctDisplayRooms').textContent = pct.toFixed(2);
+    document.getElementById('hcEffectiveLine').textContent =
+      `Effective adjustment: ${work}/${total} × ${timePct}% = ${pct.toFixed(2)}% of gross amount`;
+  }
+
+  // Refresh all 213 rows
+  rows.forEach(r => { if (isHome213(r.acc)) updateNet(r.id); });
+  updateSummary();
+}
+
+function checkHomeRows() {
+  const hasHome = rows.some(r => isHome213(r.acc) || r.home);
+  const bar = document.getElementById('homeCalcBar');
+  bar.classList.toggle('visible', hasHome);
+}
+
+function refreshRefPlaceholders() {
+  const prefix = getPrefix() || 'EXP';
+  let seq = 1;
+  rows.forEach(r => {
+    const inp = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
+    if (!inp) return;
+    if (r.post !== 'YES') { inp.placeholder = 'Ref'; return; }
+    inp.placeholder = `${prefix}-${seq}`;
+    seq++;
+  });
+}
+
+// ── UI HELPERS ───────────────────────────────────────────────────────────────
+
+// ── SORTING ───────────────────────────────────────────────────────────────────
+
+let sortCol = null;
+let sortDir = 1; // 1 = asc, -1 = desc
+
+function getRowValue(row, col) {
+  if (col === 'gross') return parseFloat(row.gross) || 0;
+  if (col === 'net') {
+    const buEl = document.querySelector(`#tr_${row.id} .bu-cell input`);
+    const bu = buEl ? buEl.value : row.bu;
+    return calcNet(parseFloat(row.gross)||0, bu, row.home, row.acc, row.vat);
+  }
+  if (col === 'date') return row.date || '';
+  return String(row[col] || '').toLowerCase();
+}
+
+function sortBy(col) {
+  if (sortCol === col) {
+    sortDir *= -1;
+  } else {
+    sortCol = col;
+    sortDir = 1;
+  }
+
+  // Update header indicators
+  document.querySelectorAll('.sort-ind').forEach(el => el.textContent = '');
+  document.querySelectorAll('thead th').forEach(el => el.classList.remove('sort-asc','sort-desc'));
+  const indEl = document.getElementById('si-' + col);
+  const thEl  = document.querySelector(`thead th[data-col="${col}"]`);
+  if (indEl) indEl.textContent = sortDir === 1 ? '▲' : '▼';
+  if (thEl)  thEl.classList.add(sortDir === 1 ? 'sort-asc' : 'sort-desc');
+
+  rows.sort((a, b) => {
+    const av = getRowValue(a, col);
+    const bv = getRowValue(b, col);
+    if (av < bv) return -1 * sortDir;
+    if (av > bv) return  1 * sortDir;
+    return 0;
+  });
+
+  // Re-render tbody in new order
+  const tbody = document.getElementById('expBody');
+  tbody.innerHTML = '';
+  rows.forEach(r => renderRow(r));
+}
+
+function showTable() {
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('expTable').style.display = 'table';
+  document.getElementById('summaryBar').style.display = 'grid';
+  updateUI();
+}
+
+function updateUI() {
+  updateSummary();
+  refreshExportBtn();
+  refreshRefPlaceholders();
+  updateMergeButton();
+  const countText = rows.length + ' row' + (rows.length!==1?'s':'');
+  document.getElementById('rowCount').textContent = countText;
+  const topCount = document.getElementById('rowCountTop');
+  if (topCount) topCount.textContent = rows.length ? countText : '';
+}
+
+function updateSummary() {
+  let posted=0, excl=0, gross=0, net=0;
+  rows.forEach(r => {
+    if (r.post==='NO') { excl++; return; }
+    posted++;
+    const g = parseFloat(r.gross)||0;
+    gross += g;
+    // Read live bu and vat from DOM
+    const buEl = document.querySelector(`#tr_${r.id} .bu-cell input`);
+    const bu = buEl ? buEl.value : r.bu;
+    const vatEl = document.querySelector(`#tr_${r.id} td:nth-child(3) select`);
+    const vat = vatEl ? vatEl.value : r.vat;
+    net += calcNet(g, bu, r.home, r.acc, vat);
+  });
+  document.getElementById('statPost').textContent = posted;
+  document.getElementById('statExcl').textContent = excl;
+  document.getElementById('statGross').textContent = '£'+gross.toFixed(2);
+  document.getElementById('statNet').textContent = '£'+net.toFixed(2);
+}
+
+function refreshExportBtn() {
+  const btn = document.getElementById('exportBtn');
+  const active = rows.some(r => r.post==='YES');
+  btn.disabled = !active;
+  document.getElementById('exportNote').textContent = active
+    ? rows.filter(r=>r.post==='YES').length + ' rows will be exported'
+    : '';
+  refreshRefPlaceholders();
+}
+
+function getInitials(name) {
+  return (name||'').trim().split(/\s+/).map(w=>w[0]||'').join('').toUpperCase()||'EXP';
+}
+
+function getPrefix() {
+  const name = document.getElementById('clientName').value.trim();
+  const quarterRaw = document.getElementById('quarter').value.trim() || 'Custom';
+  const quarter = quarterRaw.replace(/[^A-Za-z0-9]+/g, '') || 'Custom';
+  const year = document.getElementById('yearInput').value.trim();
+  if (!name || !year) return '';
+  return getInitials(name)+'-Exp-QE-'+quarter+'-'+year;
+}
+
+// invoice numbers generated silently on export via getPrefix()
+
+function setAlert(msg, type) {
+  const el = document.getElementById('mainAlert');
+  el.textContent = msg;
+  el.className = 'alert show alert-' + (type||'info');
+}
+
+// window.confirm() can be silently blocked inside a sandboxed artifact iframe
+// (which is how this tool runs inside claude.ai) — when that happens the
+// button click does nothing at all, with no error, which looks exactly like
+// a broken button. This inline confirmation can't be blocked the same way.
+function requestClearAll() {
+  if (rows.length === 0) { clearAll(); return; }
+  const box = document.getElementById('clearConfirmBox');
+  box.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'alert alert-warn show';
+  wrap.innerHTML = `<div style="margin-bottom:10px;">Clear all ${rows.length} row${rows.length!==1?'s':''} and start a new job? This can't be undone.</div>`;
+  const yes = document.createElement('button');
+  yes.className = 'btn btn-primary'; yes.style.marginRight = '8px'; yes.type = 'button';
+  yes.textContent = 'Yes, clear everything';
+  yes.onclick = () => { box.innerHTML = ''; clearAll(); };
+  const no = document.createElement('button');
+  no.className = 'btn'; no.type = 'button';
+  no.textContent = 'Cancel';
+  no.onclick = () => { box.innerHTML = ''; };
+  wrap.appendChild(yes);
+  wrap.appendChild(no);
+  box.appendChild(wrap);
+}
+
+function clearAll() {
+  rows = []; nextId = 0;
+  document.getElementById('expBody').innerHTML = '';
+  document.getElementById('expTable').style.display = 'none';
+  document.getElementById('emptyState').style.display = 'block';
+  document.getElementById('summaryBar').style.display = 'none';
+  document.getElementById('homeCalcBar').classList.remove('visible');
+  // Reset duplicate-detection memory too — a genuine fresh start means a
+  // previously-imported file is no longer "already in this table", so it
+  // should be importable again without tripping the duplicate warning.
+  importedFileHashes.clear();
+  uploadQueue = [];
+  renderUploadFileList();
+  setAlert('All rows cleared. Drop a new file or add rows manually.', 'info');
+  refreshExportBtn();
+}
+
+// ── EXPORT TYPE TOGGLE ─────────────────────────────────────────────────────────
+
+function setExportType(type) {
+  exportType = type;
+  document.getElementById('btnExportBills').classList.toggle('active', type==='bills');
+  document.getElementById('btnExportBank').classList.toggle('active', type==='bank');
+  const btn = document.getElementById('exportBtn');
+  btn.innerHTML = type==='bills' ? '↓ Download Xero CSV (Bills)' : '↓ Download Xero CSV (Bank Statement)';
+  refreshExportBtn();
+}
+
+// ── EXPORT ───────────────────────────────────────────────────────────────────
+
+function fmtDate(dateStr) {
+  // Convert YYYY-MM-DD to DD/MM/YYYY for Xero
+  if (!dateStr) return '';
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  return dateStr;
+}
+
+function exportCSV() {
+  if (exportType === 'bank') {
+    exportBankCSV();
+  } else {
+    exportBillsCSV();
+  }
+}
+
+function buildBillsCSVData() {
+  const client = document.getElementById('clientName').value.trim() || 'Client';
+  const prefix = getPrefix() || 'EXP';
+  const defDate = '';
+  const defDue  = '';
+
+  const headers = ['*ContactName','*InvoiceNumber','*InvoiceDate','*DueDate',
+                   '*Description','*Quantity','*UnitAmount','*AccountCode','*TaxType','TaxAmount'];
+  const lines = [headers.join(',')];
+
+  let seq = 1;
+  rows.forEach(r => {
+    if (r.post !== 'YES') return;
+    // A Xero Bills import is purchase invoices only — a bank-statement row
+    // marked as money received (direction:'in') is income, not an expense,
+    // and doesn't belong here even if it was accidentally left on "post:YES".
+    if ((r.direction || 'out') === 'in') return;
+
+    // Read live values from DOM
+    const grossEl = document.querySelector(`#tr_${r.id} input[type=number]`);
+    const buEl    = document.querySelector(`#tr_${r.id} .bu-cell input`);
+    const descEl  = document.querySelector(`#tr_${r.id} td:nth-child(7) input`);
+    const supEl   = document.querySelector(`#tr_${r.id} td:nth-child(6) input`);
+    const dateEl  = document.querySelector(`#tr_${r.id} input[type=date]`);
+    const refEl   = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
+    const accEl   = document.querySelector(`#tr_${r.id} td:nth-child(2) select`);
+    const vatEl   = document.querySelector(`#tr_${r.id} td:nth-child(3) select`);
+
+    const gross  = parseFloat(grossEl?.value || r.gross) || 0;
+    const bu     = buEl?.value !== '' ? buEl?.value : r.bu;
+    const accFull= accEl?.value || r.acc;
+    const accCode= (accFull||'').split(' - ')[0];
+    const vat    = vatEl?.value || r.vat;
+    const net    = calcNet(gross, bu, r.home, accFull, vat);
+    const desc   = descEl?.value || r.desc;
+    const sup    = supEl?.value  || r.supplier || client;
+    const dateStr= fmtDate(dateEl?.value || r.date) || defDate;
+    const dueStr = defDue || dateStr;
+    const ref    = refEl?.value || r.ref || `${prefix}-${seq}`;
+
+    // Build description with BU annotation
+    let descOut = desc;
+    if (isHome213(accFull)) {
+      if (homeAdjustmentApplies(vat)) {
+        descOut += ` @ ${getHomePct().toFixed(2)}% business use (home)`;
+      } else {
+        descOut += ` (Use of Home — VAT not recoverable, full amount)`;
+      }
+    } else {
+      if (bu !== '' && bu !== null && parseFloat(bu) !== 100) {
+        descOut += ` @ ${parseFloat(bu).toFixed(0)}% business use`;
+      }
+      if (r.home) {
+        descOut += ` @ ${getHomePct().toFixed(2)}% home office`;
+      }
+    }
+
+    const row = [
+      csvEsc(sup),
+      csvEsc(ref),
+      dateStr,
+      dueStr,
+      csvEsc(descOut),
+      '1',
+      net.toFixed(2),
+      accCode,
+      csvEsc(vat),
+      '',
+    ];
+    lines.push(row.join(','));
+    seq++;
+  });
+
+  return {
+    content: lines.join('\r\n'),
+    count: seq - 1,
+    fname: `xero_bills_${new Date().toISOString().slice(0,10)}.csv`,
+    label: 'Bills import',
+  };
+}
+
+async function exportBillsCSV() {
+  const data = buildBillsCSVData();
+  const ok = await triggerDownload(data.content, data.fname);
+  if (ok) setAlert(`✓ Exported ${data.count} row${data.count!==1?'s':''} to ${data.fname} (${data.label})`, 'success');
+}
+
+function buildBankCSVData() {
+  const client = document.getElementById('clientName').value.trim() || 'Client';
+  const prefix = getPrefix() || 'EXP';
+
+  // Xero precoded bank statement import columns: Date, Amount, Payee, Description, Reference, Account Code, Tax Rate
+  const headers = ['Date','Amount','Payee','Description','Reference','Account Code','Tax Rate'];
+  const lines = [headers.join(',')];
+
+  let seq = 1;
+  rows.forEach(r => {
+    if (r.post !== 'YES') return;
+
+    const grossEl = document.querySelector(`#tr_${r.id} input[type=number]`);
+    const buEl    = document.querySelector(`#tr_${r.id} .bu-cell input`);
+    const descEl  = document.querySelector(`#tr_${r.id} td:nth-child(7) input`);
+    const supEl   = document.querySelector(`#tr_${r.id} td:nth-child(6) input`);
+    const dateEl  = document.querySelector(`#tr_${r.id} input[type=date]`);
+    const refEl   = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
+    const accEl   = document.querySelector(`#tr_${r.id} td:nth-child(2) select`);
+    const vatEl   = document.querySelector(`#tr_${r.id} td:nth-child(3) select`);
+
+    const gross  = parseFloat(grossEl?.value || r.gross) || 0;
+    const bu     = buEl?.value !== '' ? buEl?.value : r.bu;
+    const accFull= accEl?.value || r.acc;
+    const accCode= (accFull||'').split(' - ')[0];
+    const vat    = vatEl?.value || r.vat;
+    const net    = calcNet(gross, bu, r.home, accFull, vat);
+    const desc   = descEl?.value || r.desc;
+    const sup    = supEl?.value  || r.supplier || client;
+    const dateStr= fmtDate(dateEl?.value || r.date);
+    const ref    = refEl?.value || r.ref || `${prefix}-${seq}`;
+
+    // Build description with BU annotation
+    let descOut = desc;
+    if (isHome213(accFull)) {
+      if (homeAdjustmentApplies(vat)) {
+        descOut += ` @ ${getHomePct().toFixed(2)}% business use (home)`;
+      } else {
+        descOut += ` (Use of Home — VAT not recoverable, full amount)`;
+      }
+    } else {
+      if (bu !== '' && bu !== null && parseFloat(bu) !== 100) {
+        descOut += ` @ ${parseFloat(bu).toFixed(0)}% business use`;
+      }
+      if (r.home) {
+        descOut += ` @ ${getHomePct().toFixed(2)}% home office`;
+      }
+    }
+
+    // Money out (expenses, the normal case) is negative; money in (income
+    // rows sourced from a bank-statement CSV, direction:'in') stays positive
+    // — Xero's own bank statement import expects that same signed-amount
+    // convention.
+    const signedAmount = (r.direction === 'in') ? Math.abs(net) : -Math.abs(net);
+    const amountOut = signedAmount.toFixed(2);
+
+    const row = [
+      dateStr,
+      amountOut,
+      csvEsc(sup),
+      csvEsc(descOut),
+      csvEsc(ref),
+      accCode,
+      csvEsc(vat),
+    ];
+    lines.push(row.join(','));
+    seq++;
+  });
+
+  return {
+    content: lines.join('\r\n'),
+    count: seq - 1,
+    fname: `xero_bank_statement_${new Date().toISOString().slice(0,10)}.csv`,
+    label: 'Bank Statement import — money out shown as negative, money in as positive. Use Xero\'s "Import a Statement" on the relevant bank account, and map the Account Code / Tax Rate columns during import to auto-reconcile.',
+  };
+}
+
+async function exportBankCSV() {
+  const data = buildBankCSVData();
+  const ok = await triggerDownload(data.content, data.fname);
+  if (ok) setAlert(`✓ Exported ${data.count} row${data.count!==1?'s':''} to ${data.fname} (${data.label})`, 'success');
+}
+
+async function triggerDownload(content, fname) {
+  try {
+    const downloads = await claude.use('downloads');
+    if (!downloads) {
+      setAlert('File downloads aren\'t available in this view.', 'warn');
+      return false;
+    }
+    const blob = new Blob([content], {type:'text/csv'});
+    const result = await downloads.save({ filename: fname, data: blob });
+    return result.status === 'saved' || result.status === 'delivered';
+  } catch (err) {
+    if (err && err.code === 'declined') return false;
+    setAlert('Download failed: ' + (err && err.message ? err.message : 'unknown error'), 'warn');
+    return false;
+  }
+}
+
+function csvEsc(val) {
+  const s = String(val||'');
+  return s.includes(',') || s.includes('"') || s.includes('\n')
+    ? `"${s.replace(/"/g,'""')}"` : s;
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+calcHome();
+loadClientList();
+
+// Set current year as default
+document.getElementById('yearInput').value = new Date().getFullYear();
+
+// Set period end to current quarter as a default (still editable free text)
+const qLabelMap = {0:'March',1:'March',2:'March',3:'June',4:'June',5:'June',6:'September',7:'September',8:'September',9:'December',10:'December',11:'December'};
+const qDateMap = {0:'-03-31',1:'-03-31',2:'-03-31',3:'-06-30',4:'-06-30',5:'-06-30',6:'-09-30',7:'-09-30',8:'-09-30',9:'-12-31',10:'-12-31',11:'-12-31'};
+const _m = new Date().getMonth();
+document.getElementById('quarter').value = qLabelMap[_m];
+document.getElementById('customQuarterDate').value = document.getElementById('yearInput').value + qDateMap[_m];
+
+refreshExportBtn();
+refreshProcessAllBtn();
+</script>
+</body>
+</html>
