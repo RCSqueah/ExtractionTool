@@ -699,6 +699,10 @@
       <span id="xeroExportStatus" style="font-size:12px;color:var(--text-muted);"></span>
     </div>
 
+    <!-- Live Xero lookup: hidden until it's rebuilt for the self-hosted
+         version (see checkXeroHistory). Kept in the page because the script
+         still references these elements. -->
+    <div id="xeroLiveSection" hidden>
     <div style="margin:16px 0 10px;border-top:1px solid var(--border);"></div>
     <div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">Or, pull it live instead</div>
     <div id="xeroCheckRow" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
@@ -706,6 +710,7 @@
       <span id="xeroCheckStatus" style="font-size:12px;color:var(--text-muted);"></span>
     </div>
     <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin:6px 0 0;">Only one Xero organisation can be connected at a time (a current Claude limitation, not a setting here). If this isn't the right client's organisation, go to Settings → Connectors → Xero → Disconnect, then Reconnect and pick the correct one before checking. Either path — file or live lookup — builds the same chart of accounts below.</div>
+    </div>
 
     <div style="margin:16px 0 10px;border-top:1px solid var(--border);"></div>
     <div id="clientHistoryPanel"></div>
@@ -1116,7 +1121,7 @@ function renderCoaPanel() {
   }
   let html = '';
   if (ACCOUNTS.every(a => isStandardAccount(a.code))) {
-    html += `<div class="helptext" style="margin-bottom:10px;">No chart of accounts yet for ${esc(currentClientKey)} — drop in a Xero export above, use "Check Xero history" below, or add accounts by hand here.</div>`;
+    html += `<div class="helptext" style="margin-bottom:10px;">No chart of accounts yet for ${esc(currentClientKey)} — drop in a Xero export above, or add accounts by hand here.</div>`;
   } else {
     html += `<div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''} for ${esc(currentClientKey)}</div>`;
     html += `<table style="width:100%;font-size:12.5px;border-collapse:collapse;margin-bottom:10px;">
