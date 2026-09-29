@@ -32,7 +32,7 @@ After this, every change merged into `main` goes live automatically.
 - **Privacy**: documents go directly from your browser to Anthropic and nowhere else. Your key is never in the code or on GitHub. Anyone else who opens the site won't have a key, so they can't use your credit or see your data.
 - **Cost**: you pay Anthropic per request. A typical document or email costs a few pence on the default model. A cheaper model, such as `claude-sonnet-5`, can be set in Settings.
 - **Private repositories**: GitHub Pages on a private repo needs a paid GitHub plan. The site itself holds no client data or keys, so a public repo is fine.
-- **Live Xero lookup** ("Check Xero history") is still disabled. Uploading a Xero export file in Step 1 does the same job.
+- **Live Xero lookup** ("Check Xero history") is hidden until it can be rebuilt. Uploading a Xero export file in Step 1 does the same job.
 - **Moving to a team setup later**: a shared version needs a server for the API key and a shared database. An earlier revision of pull request #1 has a Cloudflare version to start from.
 
 ## Updating the SDK (developers)
