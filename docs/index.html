@@ -392,6 +392,12 @@
   .del-row:hover { color: var(--red); background: var(--red-bg); }
 
   /* ── SUMMARY FOOTER ── */
+  .history-select {
+    width: 100%; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px;
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 12.5px; background: transparent; color: var(--text);
+  }
+  .history-select:hover { border-color: var(--border); background: var(--bg); }
+  .history-select:focus { outline: none; border-color: var(--text); background: #fff; }
   .gross-cell { display: flex; align-items: center; gap: 4px; }
   .dir-tag {
     flex-shrink: 0;
@@ -672,8 +678,6 @@
     <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin-top:3px;">Used as the fallback date for anything extracted without its own date.</div>
   </div>
 
-  <div id="clientHistoryPanel"></div>
-
   <!-- STEP 1: CHART OF ACCOUNTS -->
   <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin:4px 0 10px;">① CHART OF ACCOUNTS &amp; CODING HISTORY</h3>
   <div class="email-paste-bar" id="coaBar" style="margin-top:0;">
@@ -704,6 +708,7 @@
     <div class="helptext" style="font-size:10.5px;color:var(--text-faint);margin:6px 0 0;">Only one Xero organisation can be connected at a time (a current Claude limitation, not a setting here). If this isn't the right client's organisation, go to Settings → Connectors → Xero → Disconnect, then Reconnect and pick the correct one before checking. Either path — file or live lookup — builds the same chart of accounts below.</div>
 
     <div style="margin:16px 0 10px;border-top:1px solid var(--border);"></div>
+    <div id="clientHistoryPanel"></div>
     <div id="coaPanel"></div>
   </div>
 
@@ -1014,6 +1019,9 @@ async function loadClientRules() {
         if (snap.exists) {
           const data = snap.data() || {};
           if (data.rules && typeof data.rules === 'object') currentClientRules = data.rules;
+          // Drop any bookkeeping entries learned before they were filtered out.
+          const bad = Object.keys(currentClientRules).filter(k => k.startsWith('supplier:') && isBookkeepingEntry(k.slice(9)));
+          if (bad.length) { bad.forEach(k => delete currentClientRules[k]); scheduleSaveClientDoc(); }
           if (data.coa && Array.isArray(data.coa.accounts)) ACCOUNTS = data.coa.accounts;
           if (data.coa && data.coa.vatDefaults && typeof data.coa.vatDefaults === 'object') VAT_DEFAULTS = data.coa.vatDefaults;
           if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
@@ -1126,7 +1134,7 @@ function renderCoaPanel() {
         <td style="padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;">
           ${isStandardAccount(a.code)
             ? `<span title="Always included for every client" style="font-size:10.5px;color:var(--text-faint);">standard</span>`
-            : `<button type="button" onclick="deleteAccount(${JSON.stringify(a.code)})" title="Remove this account" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>`}
+            : `<button type="button" onclick="deleteAccount(${esc(JSON.stringify(a.code))})" title="Remove this account" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>`}
         </td>
       </tr>`;
     });
@@ -1186,8 +1194,17 @@ function lookupClientRule(supplier, desc) {
 // a row's coding comes from a real signal (the client's own file, a
 // high-confidence AI read, or someone manually setting it), not from a
 // generic default, so history isn't just reinforcing our own fallback guess.
+// Xero exports include bookkeeping entries in the contact/payee column —
+// journals, clearing and suspense accounts, transfers — which aren't real
+// suppliers and would otherwise auto-code any row that mentions them.
+const BOOKKEEPING_ENTRY = /\b(manual journals?|journals?|clearing|suspense|opening balances?|conversion balances?|rounding|bank revaluation|transfers?)\b/i;
+function isBookkeepingEntry(supplier) {
+  return BOOKKEEPING_ENTRY.test(String(supplier || ''));
+}
+
 function recordClientRule(supplier, desc, acc, vat) {
   if (!currentClientKey || !acc || !vat) return;
+  if (isBookkeepingEntry(supplier)) return;
   const key = ruleKeyFor(supplier, desc);
   if (!key) return;
   const existing = currentClientRules[key];
@@ -1451,6 +1468,8 @@ function buildXeroFileExtractionSystemPrompt() {
 2. How recurring suppliers/expense types are normally coded — grouped by DISTINCT combination of supplier + account + tax rate, reported ONCE each (use the most recent occurrence's date/amount for a combination that recurs many times), not one row per transaction. A supplier billed to the same account/tax rate every month for a year should appear as a single entry, not twelve.
 
 Ignore any income, sales, or fee/billing rows — this tool only tracks purchases/expenses, not the client's own invoicing.
+
+Also leave out of "items" any row whose contact/payee is a bookkeeping entry rather than a real supplier — manual journals, clearing or suspense accounts, transfers between the client's own accounts, opening/conversion balances, rounding. Their accounts can still go in "accounts".
 
 For the tax rate of each combination, map whatever tax rate name Xero uses to exactly one of these standard categories: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT. If you can't confidently map it, leave vatRate null rather than guessing.
 
@@ -1740,11 +1759,12 @@ function renderClientHistoryPanel() {
   if (!currentClientKey) { panel.innerHTML = ''; return; }
   const keys = Object.keys(currentClientRules);
   if (!keys.length) {
-    panel.innerHTML = `<div class="helptext" style="margin:-8px 0 16px;">No coding history yet for ${esc(currentClientKey)} — it'll build up as expenses are coded for them.</div>`;
+    panel.innerHTML = `<div class="helptext" style="margin-bottom:16px;">No coding history yet for ${esc(currentClientKey)} — it'll build up as expenses are coded for them.</div>`;
     return;
   }
-  let html = `<div class="email-paste-bar" style="margin:-8px 0 16px;">
-    <div class="email-paste-title">Coding history for ${esc(currentClientKey)} — shared with your team</div>
+  let html = `<div style="margin-bottom:18px;">
+    <div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px;">Coding history for ${esc(currentClientKey)}</div>
+    <div class="helptext" style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">How this client's suppliers are usually coded, saved in this browser. Change a dropdown to correct an entry, or × to forget it.</div>
     <table style="width:100%;font-size:12.5px;border-collapse:collapse;">
       <thead><tr>
         <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Matched on</th>
@@ -1757,15 +1777,35 @@ function renderClientHistoryPanel() {
     const label = key.startsWith('supplier:') ? `Supplier: ${key.slice(9)}` : `Description: ${key.slice(5)}`;
     html += `<tr>
       <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(label)}</td>
-      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(rule.acc)}</td>
-      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(rule.vat)}</td>
+      <td style="padding:3px 8px;border-bottom:1px solid var(--border);">
+        <select class="history-select" onchange="updateClientRule(${esc(JSON.stringify(key))},'acc',this.value)">${historyAccOptions(rule.acc)}</select>
+      </td>
+      <td style="padding:3px 8px;border-bottom:1px solid var(--border);">
+        <select class="history-select" onchange="updateClientRule(${esc(JSON.stringify(key))},'vat',this.value)">${VAT_RATES.map(v => `<option value="${esc(v)}"${v === rule.vat ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>
+      </td>
       <td style="padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;">
-        <button type="button" onclick="deleteClientRule(${JSON.stringify(key)})" title="Remove this learned rule" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>
+        <button type="button" onclick="deleteClientRule(${esc(JSON.stringify(key))})" title="Remove this learned rule" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>
       </td>
     </tr>`;
   });
   html += `</tbody></table></div>`;
   panel.innerHTML = html;
+}
+
+// Account options for a history row. A remembered account that's no longer
+// in the chart (e.g. learned before the chart changed) is kept as an option
+// so it still shows what was saved rather than silently appearing blank.
+function historyAccOptions(selected) {
+  const vals = ACCOUNTS.map(a => `${a.code} - ${a.name}`);
+  if (selected && !vals.includes(selected)) vals.unshift(selected);
+  return vals.map(v => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(v)}</option>`).join('');
+}
+
+function updateClientRule(key, field, value) {
+  const rule = currentClientRules[key];
+  if (!rule || !value) return;
+  rule[field] = value;
+  scheduleSaveClientDoc();
 }
 
 async function deleteClientRule(key) {
