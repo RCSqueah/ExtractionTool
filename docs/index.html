@@ -392,9 +392,27 @@
   .del-row:hover { color: var(--red); background: var(--red-bg); }
 
   /* ── SUMMARY FOOTER ── */
+  .gross-cell { display: flex; align-items: center; gap: 4px; }
+  .dir-tag {
+    flex-shrink: 0;
+    border: none;
+    border-radius: 10px;
+    padding: 3px 7px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9.5px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .dir-tag.out { background: var(--surface2); color: var(--text-muted); }
+  .dir-tag.in  { background: var(--green-bg); color: var(--green); }
+  tbody td input.money-in { color: var(--green); font-weight: 500; }
+  .net-amt.money-in { color: var(--green); font-weight: 500; }
+  tbody td input.notes-input { color: var(--amber); font-size: 11.5px; }
+
   .summary-bar {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 12px;
     margin-bottom: 20px;
   }
@@ -820,6 +838,7 @@
           <th style="min-width:100px" onclick="sortBy('date')" class="sortable" data-col="date">Date <span class="sort-ind" id="si-date"></span></th>
           <th style="min-width:110px" onclick="sortBy('supplier')" class="sortable" data-col="supplier">Supplier <span class="sort-ind" id="si-supplier"></span></th>
           <th style="min-width:300px" onclick="sortBy('desc')" class="sortable" data-col="desc">Description <span class="sort-ind" id="si-desc"></span></th>
+          <th style="min-width:220px" title="Review notes from AI extraction and history checks — never included in the Xero CSV">Notes</th>
           <th style="min-width:130px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
           <th style="width:100px">% BU</th>
           <th style="width:60px">Home</th>
@@ -847,12 +866,16 @@
       <div class="stat-val" id="statExcl">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Gross total</div>
+      <div class="stat-label" id="statGrossLabel">Gross total</div>
       <div class="stat-val" id="statGross">£0.00</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">BU-adjusted total</div>
+      <div class="stat-label" id="statNetLabel">BU-adjusted total</div>
       <div class="stat-val" id="statNet">£0.00</div>
+    </div>
+    <div class="stat-card" id="statInCard" style="display:none">
+      <div class="stat-label">Money in</div>
+      <div class="stat-val" id="statIn" style="color:var(--green)">£0.00</div>
     </div>
   </div>
 
@@ -883,6 +906,26 @@
 // again. Starts empty until a client is selected and Step 1 has run.
 let ACCOUNTS = [];
 let VAT_DEFAULTS = {};
+
+// Accounts every client has regardless of their Xero chart, per firm
+// convention. They're always in the dropdown and can't be removed, but are
+// kept out of the AI's coding list so they're only ever chosen by hand.
+const STANDARD_ACCOUNTS = [
+  { code: '980', name: 'Personal Use Adjustments', vat: 'No VAT' },
+];
+function isStandardAccount(code) {
+  return STANDARD_ACCOUNTS.some(a => a.code === String(code));
+}
+function ensureStandardAccounts() {
+  STANDARD_ACCOUNTS.forEach(std => {
+    const existing = ACCOUNTS.find(a => a.code === std.code);
+    if (existing) existing.name = std.name;
+    else ACCOUNTS.push({ code: std.code, name: std.name });
+    VAT_DEFAULTS[std.code] = std.vat;
+  });
+  ACCOUNTS.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+}
+ensureStandardAccounts();
 
 const VAT_RATES = [
   '20% (VAT on Expenses)', '5% (VAT on Expenses)',
@@ -981,6 +1024,8 @@ async function loadClientRules() {
     }
   }
 
+  ensureStandardAccounts();
+
   const xeroBtn = document.getElementById('xeroCheckBtn');
   if (xeroBtn) xeroBtn.disabled = !currentClientKey;
   document.getElementById('xeroCheckStatus').textContent = '';
@@ -1034,6 +1079,7 @@ function mergeIntoCoa(newAccounts, newVatDefaults) {
   Object.keys(newVatDefaults || {}).forEach(code => {
     if (VAT_RATES.includes(newVatDefaults[code])) VAT_DEFAULTS[code] = newVatDefaults[code];
   });
+  ensureStandardAccounts();
   scheduleSaveClientDoc();
 }
 
@@ -1061,7 +1107,7 @@ function renderCoaPanel() {
     return;
   }
   let html = '';
-  if (!ACCOUNTS.length) {
+  if (ACCOUNTS.every(a => isStandardAccount(a.code))) {
     html += `<div class="helptext" style="margin-bottom:10px;">No chart of accounts yet for ${esc(currentClientKey)} — drop in a Xero export above, use "Check Xero history" below, or add accounts by hand here.</div>`;
   } else {
     html += `<div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''} for ${esc(currentClientKey)}</div>`;
@@ -1078,7 +1124,9 @@ function renderCoaPanel() {
         <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(a.name)}</td>
         <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(VAT_DEFAULTS[a.code]||'—')}</td>
         <td style="padding:5px 8px;border-bottom:1px solid var(--border);text-align:right;">
-          <button type="button" onclick="deleteAccount(${JSON.stringify(a.code)})" title="Remove this account" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>
+          ${isStandardAccount(a.code)
+            ? `<span title="Always included for every client" style="font-size:10.5px;color:var(--text-faint);">standard</span>`
+            : `<button type="button" onclick="deleteAccount(${JSON.stringify(a.code)})" title="Remove this account" style="background:none;border:none;color:var(--text-faint);cursor:pointer;font-size:14px;">&times;</button>`}
         </td>
       </tr>`;
     });
@@ -1113,6 +1161,7 @@ function addAccountManually() {
 }
 
 async function deleteAccount(code) {
+  if (isStandardAccount(code)) return;
   ACCOUNTS = ACCOUNTS.filter(a => a.code !== code);
   delete VAT_DEFAULTS[code];
   await saveClientDoc();
@@ -1149,8 +1198,8 @@ function recordClientRule(supplier, desc, acc, vat) {
 
 // Compares an explicitly-stated acc/VAT (from a file or AI extraction) against
 // this client's remembered history and, failing that, the standard account
-// default — returns a bracketed note to append to the description if they
-// disagree, or '' if there's nothing to flag. Pure data comparison, no AI call.
+// default — returns a note for the row's Notes column if they disagree, or
+// '' if there's nothing to flag. Pure data comparison, no AI call.
 function checkAgainstHistoryAndDefaults(acc, vatExplicit, supplier, desc) {
   if (!acc) return '';
   const learned = lookupClientRule(supplier, desc);
@@ -1169,7 +1218,7 @@ function checkAgainstHistoryAndDefaults(acc, vatExplicit, supplier, desc) {
     notes.push(`differs from the standard default of ${stdVat} for this account`);
   }
 
-  return notes.length ? ` [Check: ${notes.join('; ')}]` : '';
+  return notes.length ? `Check: ${notes.join('; ')}` : '';
 }
 
 // ── PER-CLIENT EXTRA INSTRUCTIONS ────────────────────────────────────────────
@@ -1887,9 +1936,9 @@ function parseFile(file) {
         // client's remembered history and the standard defaults, and worth
         // remembering for next time. A blank cell that just got defaulted
         // below is NOT a real signal, so it's excluded from both.
-        let flagNote = '';
+        const notes = [];
         if (accFull && vatMatch) {
-          flagNote = checkAgainstHistoryAndDefaults(accFull, vatMatch, supplierVal, descVal);
+          notes.push(checkAgainstHistoryAndDefaults(accFull, vatMatch, supplierVal, descVal));
           recordClientRule(supplierVal, descVal, accFull, vatMatch);
         }
 
@@ -1900,7 +1949,8 @@ function parseFile(file) {
           ref: String(r[4]||'').trim(),
           date: dateISO,
           supplier: supplierVal,
-          desc: descVal + flagNote,
+          desc: descVal,
+          notes: joinNotes(notes),
           gross: isNaN(gross) ? '' : gross,
           bu: '',
           home: false,
@@ -2324,10 +2374,11 @@ function readFileAsBase64(file) {
 // grounded in exactly the same coding conventions the manual dropdowns use —
 // not a generic "guess a category" prompt.
 function buildChartOfAccountsText() {
-  if (!ACCOUNTS.length) {
+  const codable = ACCOUNTS.filter(a => !isStandardAccount(a.code));
+  if (!codable.length) {
     return '(No chart of accounts has been set up for this client yet — leave "accountCode" null for every line item; the user will code accounts manually.)';
   }
-  return ACCOUNTS.map(a => {
+  return codable.map(a => {
     const vat = VAT_DEFAULTS[a.code] || 'No VAT';
     return `${a.code} - ${a.name} (default VAT: ${vat})`;
   }).join('\n');
@@ -2443,11 +2494,9 @@ async function callChambersExtraction(file, kind) {
 // Maps a model-extracted row onto this tool's own row shape (same shape addRow
 // already expects from the .xlsx importer and the email parser), matching the
 // account code back to the ACCOUNTS list so it renders as a normal dropdown
-// selection rather than free text. Confidence and any model-flagged issues are
-// folded into the description as a bracketed note — this keeps the existing
-// "needs-attention" highlighting meaningful (a row with a matched account/VAT
-// but low AI confidence still reads as something to check) without touching
-// the fixed table column layout.
+// selection rather than free text. Confidence and any model-flagged issues go
+// in the row's Notes column, which is for review only and never exported, so
+// the Description that reaches Xero stays clean.
 function mapChambersRowToInternal(aiRow) {
   const found = aiRow.accountCode ? ACCOUNTS.find(a => a.code === String(aiRow.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
@@ -2455,19 +2504,18 @@ function mapChambersRowToInternal(aiRow) {
   const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
   const vat = supplierVatOverride(aiRow.supplier) || modelVat;
 
-  let desc = aiRow.description || '';
+  const desc = aiRow.description || '';
+  const notes = [];
   if (aiRow.confidence && aiRow.confidence !== 'high') {
-    desc += ` [AI ${aiRow.confidence} confidence — verify]`;
+    notes.push(`AI ${aiRow.confidence} confidence — verify`);
   }
-  if (aiRow.issues) {
-    desc += ` [${aiRow.issues}]`;
-  }
+  if (aiRow.issues) notes.push(aiRow.issues);
   // Only a high-confidence read (model states account/VAT/amount were all
   // clearly stated on the document) counts as real signal to check against
   // history and worth remembering — a medium/low guess shouldn't feed into
   // shared history for every other client's job.
   if (accFull && modelVatExplicit) {
-    desc += checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, aiRow.supplier, aiRow.description);
+    notes.push(checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, aiRow.supplier, aiRow.description));
     if (aiRow.confidence === 'high') recordClientRule(aiRow.supplier, aiRow.description, accFull, modelVatExplicit);
   }
 
@@ -2479,7 +2527,7 @@ function mapChambersRowToInternal(aiRow) {
     const pct = Number(aiRow.businessUsePercent);
     if (!isNaN(pct)) {
       bu = Math.max(0, Math.min(100, pct));
-      desc += ` [AI set business use to ${bu}% per your instructions — verify]`;
+      notes.push(`AI set business use to ${bu}% per your instructions — verify`);
     }
   }
 
@@ -2491,6 +2539,7 @@ function mapChambersRowToInternal(aiRow) {
     date: aiRow.date || '',
     supplier: aiRow.supplier || '',
     desc: desc,
+    notes: joinNotes(notes),
     gross: (aiRow.amount === null || aiRow.amount === undefined) ? '' : Number(aiRow.amount),
     bu: bu,
     home: false,
@@ -2584,14 +2633,15 @@ function mapBankRowToInternal(t) {
   const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
   const vat = supplierVatOverride(t.payee) || modelVat;
 
-  let desc = t.description || '';
-  if (direction === 'in') desc += ' [Money in — review before including as an expense]';
-  if (t.likelyNonBusiness) desc += ' [Possibly personal / non-business — review]';
-  if (t.confidence && t.confidence !== 'high') desc += ` [AI ${t.confidence} confidence — verify]`;
-  if (t.issues) desc += ` [${t.issues}]`;
+  const desc = t.description || '';
+  const notes = [];
+  if (direction === 'in') notes.push('Money in — review before including');
+  if (t.likelyNonBusiness) notes.push('Possibly personal / non-business — review');
+  if (t.confidence && t.confidence !== 'high') notes.push(`AI ${t.confidence} confidence — verify`);
+  if (t.issues) notes.push(t.issues);
 
   if (accFull && modelVatExplicit) {
-    desc += checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, t.payee, t.description);
+    notes.push(checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, t.payee, t.description));
     if (t.confidence === 'high' && direction === 'out' && !t.likelyNonBusiness) {
       recordClientRule(t.payee, t.description, accFull, modelVatExplicit);
     }
@@ -2607,10 +2657,12 @@ function mapBankRowToInternal(t) {
     date: t.date || '',
     supplier: t.payee || '',
     desc: desc,
+    notes: joinNotes(notes),
     gross: (t.amount === null || t.amount === undefined || isNaN(Number(t.amount))) ? '' : Math.abs(Number(t.amount)),
     bu: '',
     home: false,
     direction: direction,
+    fromBank: true,
   };
 }
 
@@ -2746,7 +2798,8 @@ function addRow(data) {
   const vatOverride = supplierVatOverride(d.supplier);
   let acc = d.acc || '';
   let vat = vatOverride || d.vat || '';
-  let desc = d.desc || '';
+  const desc = d.desc || '';
+  let notes = d.notes || '';
 
   // Nothing came in coded (no account) — check this client's history before
   // leaving it blank. Only fires on genuinely blank rows, so it never
@@ -2757,7 +2810,7 @@ function addRow(data) {
     if (learned && learned.acc) {
       acc = learned.acc;
       if (!vatOverride) vat = learned.vat || vat;
-      desc += ' [matches how this client is usually coded — verify]';
+      notes = joinNotes([notes, 'Matches how this client is usually coded — verify']);
     }
   }
 
@@ -2770,14 +2823,21 @@ function addRow(data) {
     date: d.date || '',
     supplier: d.supplier || '',
     desc,
+    // Review notes (AI confidence, history checks, …) — shown in the Notes
+    // column only, never included in either CSV export.
+    notes,
     gross: d.gross !== undefined ? d.gross : '',
     bu: d.bu || '',
     home: d.home || false,
     // 'out' (money leaving the account, the normal case for every existing
     // source — templates, chambers bills, emails) or 'in' (money received),
-    // only ever set to 'in' by the bank-statement CSV path above. Used only
-    // by buildBankCSVData to sign the exported amount correctly.
+    // only ever set to 'in' by the bank-statement CSV path above (or the
+    // IN/OUT tag on a bank row). Used by buildBankCSVData to sign the
+    // exported amount, and by the table to show it.
     direction: d.direction === 'in' ? 'in' : 'out',
+    // Came from a bank statement CSV — only these rows show the IN/OUT tag
+    // and signed amounts, so expense-only jobs look exactly as before.
+    fromBank: !!d.fromBank,
     _selected: false,
   });
   renderRow(rows[rows.length-1]);
@@ -2790,6 +2850,31 @@ function addBlankRow() {
   const newRow = rows[rows.length - 1];
   const tr = document.getElementById('tr_' + newRow.id);
   if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// Joins review notes into one line for the Notes column, skipping blanks.
+function joinNotes(parts) {
+  return (parts || []).map(p => String(p || '').trim()).filter(Boolean).join(' · ');
+}
+
+// BU Amt display. Bank-statement rows show the sign the Bank Statement CSV
+// will use (+ money in, − money out); every other row stays a plain amount.
+function formatNetAmount(row, net) {
+  if (isNaN(net)) return '—';
+  const amt = `£${Math.abs(net).toFixed(2)}`;
+  if (!row.fromBank || net === 0) return `£${net.toFixed(2)}`;
+  return (row.direction === 'in' ? '+' : '−') + amt;
+}
+
+// IN/OUT tag on bank rows — lets a transaction Claude read the wrong way
+// round be corrected before export.
+function toggleDirection(id) {
+  const row = rows.find(r => r.id === id);
+  if (!row) return;
+  row.direction = row.direction === 'in' ? 'out' : 'in';
+  const tr = document.getElementById('tr_' + id);
+  if (tr) tr.innerHTML = buildRowHTML(row);
+  updateUI();
 }
 
 function removeRow(id) {
@@ -2844,8 +2929,12 @@ function mergeSelectedRows() {
     const refEl   = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
     const accEl   = document.querySelector(`#tr_${r.id} td:nth-child(2) select`);
     const vatEl   = document.querySelector(`#tr_${r.id} td:nth-child(3) select`);
+    const notesEl = document.querySelector(`#tr_${r.id} input.notes-input`);
     return {
       gross: parseFloat(grossEl?.value ?? r.gross) || 0,
+      notes: (notesEl?.value ?? r.notes) || '',
+      direction: r.direction === 'in' ? 'in' : 'out',
+      fromBank: !!r.fromBank,
       desc: (descEl?.value ?? r.desc) || '',
       supplier: (supEl?.value ?? r.supplier) || '',
       date: (dateEl?.value ?? r.date) || '',
@@ -2855,17 +2944,24 @@ function mergeSelectedRows() {
     };
   });
 
-  const totalGross = round2(live.reduce((s, r) => s + r.gross, 0));
+  // Bank rows carry a direction: net money in against money out so a merged
+  // bank row keeps the right sign. Everything else is money out as before.
+  const anyBank = live.some(r => r.fromBank);
+  const signedTotal = round2(live.reduce((s, r) => s + (r.direction === 'in' ? r.gross : -r.gross), 0));
+  const mixedDirection = anyBank && !live.every(r => r.direction === live[0].direction);
+  const totalGross = anyBank ? Math.abs(signedTotal) : round2(live.reduce((s, r) => s + r.gross, 0));
   const allSameAcc = !!live[0].acc && live.every(r => r.acc === live[0].acc);
   const allSameVat = !!live[0].vat && live.every(r => r.vat === live[0].vat);
   const allSameSupplier = !!live[0].supplier && live.every(r => r.supplier === live[0].supplier);
 
   const descParts = live.map(r => r.desc).filter(Boolean);
-  let mergedDesc = descParts.length
+  const mergedDesc = descParts.length
     ? `Merged (${live.length} lines): ${descParts.join('; ')}`
     : `Merged total of ${live.length} lines`;
-  if (!allSameAcc) mergedDesc += ' [mixed accounts — confirm]';
-  if (!allSameVat) mergedDesc += ' [mixed VAT rates — confirm]';
+  const mergedNotes = [...live.map(r => r.notes)];
+  if (!allSameAcc) mergedNotes.push('Mixed accounts — confirm');
+  if (!allSameVat) mergedNotes.push('Mixed VAT rates — confirm');
+  if (mixedDirection) mergedNotes.push('Mixed money in and out — netted, confirm');
 
   const earliestDate = live.map(r => r.date).filter(Boolean).sort()[0] || '';
   const firstRef = live.map(r => r.ref).filter(Boolean)[0] || '';
@@ -2881,9 +2977,12 @@ function mergeSelectedRows() {
     date: earliestDate,
     supplier: mergedSupplier,
     desc: mergedDesc,
+    notes: joinNotes([...new Set(mergedNotes)]),
     gross: totalGross,
     bu: '',
     home: false,
+    direction: anyBank && signedTotal > 0 ? 'in' : 'out',
+    fromBank: anyBank,
   };
 
   // Remove the originals first so the merged row lands cleanly at the end
@@ -2909,7 +3008,8 @@ function buildRowHTML(row) {
   const gross = row.gross !== '' ? parseFloat(row.gross) : 0;
   const net = calcNet(gross, row.bu, row.home, row.acc, row.vat);
   const netAdj = (isHome213(row.acc) || row.bu !== '' || row.home) && net !== gross;
-  const netStr = isNaN(net) ? '—' : `£${net.toFixed(2)}`;
+  const inRow = row.fromBank && row.direction === 'in';
+  const netStr = formatNetAmount(row, net);
   const homeAdjApplies = isHome213(row.acc) && homeAdjustmentApplies(row.vat);
   return `
     <td class="no-strike" style="text-align:center;">
@@ -2921,7 +3021,8 @@ function buildRowHTML(row) {
     <td><input type="date" value="${row.date||''}" onchange="setField(${id},'date',this.value)" onkeydown="if(event.key==='Enter')this.blur()"></td>
     <td><input type="text" value="${esc(row.supplier)}" onchange="setField(${id},'supplier',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Supplier"></td>
     <td><input type="text" value="${esc(row.desc)}" onchange="setField(${id},'desc',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Description"></td>
-    <td><input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"></td>
+    <td class="no-strike"><input type="text" class="notes-input" value="${esc(row.notes)}" title="${esc(row.notes)}" onchange="setField(${id},'notes',this.value);this.title=this.value" onkeydown="if(event.key==='Enter')this.blur()" placeholder="—"></td>
+    <td><div class="gross-cell">${row.fromBank ? `<button type="button" class="dir-tag ${inRow ? 'in' : 'out'}" onclick="toggleDirection(${id})" title="${inRow ? 'Money in (received)' : 'Money out (paid)'} — click to switch">${inRow ? 'IN' : 'OUT'}</button>` : ''}<input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"${inRow ? ' class="money-in"' : ''}></div></td>
     <td class="no-strike">
       <div class="bu-cell">
         <input type="number" min="0" max="100" step="1" value="${isHome213(row.acc) ? '' : (row.bu!==''?row.bu:'')}"
@@ -2940,7 +3041,7 @@ function buildRowHTML(row) {
       }
     </td>
     <td class="no-strike">
-      <div class="net-amt${netAdj?' adjusted':''}\" id="net_${id}">${netStr}</div>
+      <div class="net-amt${netAdj?' adjusted':''}${inRow?' money-in':''}\" id="net_${id}">${netStr}</div>
     </td>
     <td class="no-strike">
       <button class="del-row" onclick="removeRow(${id})">×</button>
@@ -3208,8 +3309,8 @@ function updateNet(id) {
   const netAdj = (isHome213(row.acc) || row.bu !== '' || row.home) && net !== gross;
   const el = document.getElementById('net_'+id);
   if (el) {
-    el.textContent = isNaN(net) ? '—' : `£${net.toFixed(2)}`;
-    el.className = 'net-amt' + (netAdj?' adjusted':'');
+    el.textContent = formatNetAmount(row, net);
+    el.className = 'net-amt' + (netAdj?' adjusted':'') + (row.fromBank && row.direction === 'in' ? ' money-in' : '');
   }
   updateSummary();
 }
@@ -3348,11 +3449,14 @@ function updateUI() {
 }
 
 function updateSummary() {
-  let posted=0, excl=0, gross=0, net=0;
+  let posted=0, excl=0, gross=0, net=0, grossIn=0, anyIn=false;
   rows.forEach(r => {
     if (r.post==='NO') { excl++; return; }
     posted++;
     const g = parseFloat(r.gross)||0;
+    // Money received (bank rows tagged IN) is totalled separately rather
+    // than added to the expense totals.
+    if (r.fromBank && r.direction === 'in') { anyIn = true; grossIn += g; return; }
     gross += g;
     // Read live bu and vat from DOM
     const buEl = document.querySelector(`#tr_${r.id} .bu-cell input`);
@@ -3365,6 +3469,10 @@ function updateSummary() {
   document.getElementById('statExcl').textContent = excl;
   document.getElementById('statGross').textContent = '£'+gross.toFixed(2);
   document.getElementById('statNet').textContent = '£'+net.toFixed(2);
+  document.getElementById('statGrossLabel').textContent = anyIn ? 'Money out — gross' : 'Gross total';
+  document.getElementById('statNetLabel').textContent = anyIn ? 'Money out — BU-adjusted' : 'BU-adjusted total';
+  document.getElementById('statInCard').style.display = anyIn ? '' : 'none';
+  document.getElementById('statIn').textContent = '£'+grossIn.toFixed(2);
 }
 
 function refreshExportBtn() {
