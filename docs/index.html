@@ -278,8 +278,8 @@
     border-color: #f0a0a0;
     background: var(--red-bg);
   }
-  tbody tr.excluded td { text-decoration: line-through; }
-  tbody tr.excluded td.no-strike { text-decoration: none; }
+  tbody tr.income-row { background: #f1f8f3; }
+  tbody tr.income-row:hover { background: #e4f2e8; }
 
   tbody td {
     padding: 7px 10px;
@@ -399,6 +399,7 @@
   .history-select:hover { border-color: var(--border); background: var(--bg); }
   .history-select:focus { outline: none; border-color: var(--text); background: #fff; }
   .gross-cell { display: flex; align-items: center; gap: 4px; }
+  .gross-cell input { min-width: 80px; }
   .dir-tag {
     flex-shrink: 0;
     border: none;
@@ -733,9 +734,10 @@
     <div class="email-paste-title">📂 Add client documents</div>
     <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
       Drop the client's expense template (.xlsx), an Outlook email (.msg), chambers bill PDFs/scans (PNG/JPG), or a raw bank statement
-      export (.csv) — any mix, any number. A bank statement CSV is read line-by-line and every transaction is added as a row: money out
-      is coded as an expense, money in and anything that looks personal (drawings, transfers to yourself, personal card repayments, HMRC
-      self-assessment, etc.) is added but excluded by default — <strong>always double-check these before exporting</strong>. Each file
+      export (.csv) — any mix, any number. A bank statement CSV is read line-by-line and every transaction is added as a row, exactly as
+      on the statement: money out as expenses, money in shown in green as <strong>income</strong>. Anything that looks personal (drawings,
+      transfers to yourself, personal card repayments, HMRC self-assessment, etc.) is flagged in Notes — <strong>code these yourself,
+      e.g. to 980 Personal Use Adjustments, before exporting</strong>. Each file
       <strong>adds</strong> to the rows below rather than clearing what's already there, so a client who sends a separate file
       per month (e.g. three months of bank statements) can just have all of them dropped in together, or added one at a time as they arrive.
       Use "Clear all" above if you want to start over completely.
@@ -850,7 +852,7 @@
           <th style="min-width:110px" onclick="sortBy('supplier')" class="sortable" data-col="supplier">Supplier <span class="sort-ind" id="si-supplier"></span></th>
           <th style="min-width:300px" onclick="sortBy('desc')" class="sortable" data-col="desc">Description <span class="sort-ind" id="si-desc"></span></th>
           <th style="min-width:220px" title="Review notes from AI extraction and history checks — never included in the Xero CSV">Notes</th>
-          <th style="min-width:130px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
+          <th style="min-width:175px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
           <th style="width:100px">% BU</th>
           <th style="width:60px">Home</th>
           <th style="width:100px" class="text-right" onclick="sortBy('net')" class="sortable" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
@@ -869,12 +871,8 @@
   <!-- SUMMARY -->
   <div class="summary-bar" id="summaryBar" style="display:none">
     <div class="stat-card">
-      <div class="stat-label">Rows to post</div>
+      <div class="stat-label">Rows</div>
       <div class="stat-val" id="statPost">0</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Rows excluded</div>
-      <div class="stat-val" id="statExcl">0</div>
     </div>
     <div class="stat-card">
       <div class="stat-label" id="statGrossLabel">Gross total</div>
@@ -885,8 +883,12 @@
       <div class="stat-val" id="statNet">£0.00</div>
     </div>
     <div class="stat-card" id="statInCard" style="display:none">
-      <div class="stat-label">Money in</div>
+      <div class="stat-label">Income</div>
       <div class="stat-val" id="statIn" style="color:var(--green)">£0.00</div>
+    </div>
+    <div class="stat-card" id="statNetMoveCard" style="display:none" title="Income minus money out — should match the change in the bank balance over the statement">
+      <div class="stat-label">Net (income − out)</div>
+      <div class="stat-val" id="statNetMove">£0.00</div>
     </div>
   </div>
 
@@ -1983,13 +1985,14 @@ function parseFile(file) {
         // remembering for next time. A blank cell that just got defaulted
         // below is NOT a real signal, so it's excluded from both.
         const notes = [];
+        if (String(r[0]||'').trim().toUpperCase() === 'NO') notes.push("Marked 'NO' (don't post) in the client's template — review");
         if (accFull && vatMatch) {
           notes.push(checkAgainstHistoryAndDefaults(accFull, vatMatch, supplierVal, descVal));
           recordClientRule(supplierVal, descVal, accFull, vatMatch);
         }
 
         addRow({
-          post: String(r[0]||'YES').trim().toUpperCase() === 'NO' ? 'NO' : 'YES',
+          post: 'YES',
           acc: accFull,
           vat: vat,
           ref: String(r[4]||'').trim(),
@@ -2607,11 +2610,10 @@ function mapChambersRowToInternal(aiRow) {
 // history of the account (money in AND money out), not a pre-filtered list
 // of chargeable expenses. So this path is deliberately more cautious than
 // the chambers/email extraction above: every transaction is still added as a
-// row (nothing is silently dropped), but incoming money and anything that
-// looks personal (drawings, transfers to the owner, personal card
-// repayments, HMRC self-assessment, etc.) is excluded (post:'NO') by default
-// rather than assumed to be a business expense — the accountant reviews and
-// flips "post" to YES for anything that should go in after all. Read as
+// row and exported, money in as income. Anything that looks personal
+// (drawings, transfers to the owner, personal card repayments, HMRC
+// self-assessment, etc.) is only flagged in Notes — the accountant codes it,
+// e.g. to 980 Personal Use Adjustments. Read as
 // plain text and sent to the model the same way the Xero-export chart of
 // accounts reader does (extractTextFromXeroExport / callXeroFileExtraction
 // above), reusing the same chunking helpers for large statements.
@@ -2703,11 +2705,10 @@ async function callBankStatementExtraction(text) {
   return parsed;
 }
 
-// Maps one extracted bank transaction onto this tool's row shape. Unlike
-// mapChambersRowToInternal, this defaults "post" to NO for anything that
-// isn't a confident, business-flavoured outgoing payment — money in and
-// anything flagged likelyNonBusiness still gets added (so nothing from the
-// statement is hidden), just excluded from export until reviewed.
+// Maps one extracted bank transaction onto this tool's row shape. Every
+// transaction is included, exactly as on the statement: money in is marked
+// as income, and anything that looks personal is flagged in Notes for the
+// accountant to code — nothing is excluded from export.
 function mapBankRowToInternal(t) {
   const direction = t.direction === 'in' ? 'in' : 'out';
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
@@ -2718,8 +2719,8 @@ function mapBankRowToInternal(t) {
 
   const desc = t.description || '';
   const notes = [];
-  if (direction === 'in') notes.push('Money in — review before including');
-  if (t.likelyNonBusiness) notes.push('Possibly personal / non-business — review');
+  if (direction === 'in') notes.push('Income');
+  if (t.likelyNonBusiness) notes.push('Possibly personal — consider 980 Personal Use Adjustments');
   if (t.confidence && t.confidence !== 'high') notes.push(`AI ${t.confidence} confidence — verify`);
   if (t.issues) notes.push(t.issues);
 
@@ -2730,10 +2731,8 @@ function mapBankRowToInternal(t) {
     }
   }
 
-  const excluded = direction === 'in' || !!t.likelyNonBusiness;
-
   return {
-    post: excluded ? 'NO' : 'YES',
+    post: 'YES',
     acc: accFull,
     vat: vat,
     ref: '',
@@ -2851,6 +2850,8 @@ async function processUnifiedQueue() {
         });
         item.addedCount = result.added;
         item.warning = result.warning || null;
+        // A statement carries income, which only the Bank Statement CSV can hold.
+        if (result.added) setExportType('bank');
       } else {
         throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, or .csv');
       }
@@ -3004,7 +3005,10 @@ function toggleDirection(id) {
   if (!row) return;
   row.direction = row.direction === 'in' ? 'out' : 'in';
   const tr = document.getElementById('tr_' + id);
-  if (tr) tr.innerHTML = buildRowHTML(row);
+  if (tr) {
+    tr.innerHTML = buildRowHTML(row);
+    tr.classList.toggle('income-row', row.direction === 'in');
+  }
   updateUI();
 }
 
@@ -3128,7 +3132,7 @@ function renderRow(row) {
   const tbody = document.getElementById('expBody');
   const tr = document.createElement('tr');
   tr.id = 'tr_' + row.id;
-  if (row.post === 'NO') tr.classList.add('excluded');
+  if (row.fromBank && row.direction === 'in') tr.classList.add('income-row');
   if (!row.acc || !row.vat) tr.classList.add('needs-attention');
   tr.innerHTML = buildRowHTML(row);
   tbody.appendChild(tr);
@@ -3153,7 +3157,7 @@ function buildRowHTML(row) {
     <td><input type="text" value="${esc(row.supplier)}" onchange="setField(${id},'supplier',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Supplier"></td>
     <td><input type="text" value="${esc(row.desc)}" onchange="setField(${id},'desc',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Description"></td>
     <td class="no-strike"><input type="text" class="notes-input" value="${esc(row.notes)}" title="${esc(row.notes)}" onchange="setField(${id},'notes',this.value);this.title=this.value" onkeydown="if(event.key==='Enter')this.blur()" placeholder="—"></td>
-    <td><div class="gross-cell">${row.fromBank ? `<button type="button" class="dir-tag ${inRow ? 'in' : 'out'}" onclick="toggleDirection(${id})" title="${inRow ? 'Money in (received)' : 'Money out (paid)'} — click to switch">${inRow ? 'IN' : 'OUT'}</button>` : ''}<input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"${inRow ? ' class="money-in"' : ''}></div></td>
+    <td><div class="gross-cell">${row.fromBank ? `<button type="button" class="dir-tag ${inRow ? 'in' : 'out'}" onclick="toggleDirection(${id})" title="${inRow ? 'Income — money received' : 'Money out (paid)'} — click to switch">${inRow ? 'INCOME' : 'OUT'}</button>` : ''}<input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"${inRow ? ' class="money-in"' : ''}></div></td>
     <td class="no-strike">
       <div class="bu-cell">
         <input type="number" min="0" max="100" step="1" value="${isHome213(row.acc) ? '' : (row.bu!==''?row.bu:'')}"
@@ -3580,9 +3584,8 @@ function updateUI() {
 }
 
 function updateSummary() {
-  let posted=0, excl=0, gross=0, net=0, grossIn=0, anyIn=false;
+  let posted=0, gross=0, net=0, grossIn=0, anyIn=false;
   rows.forEach(r => {
-    if (r.post==='NO') { excl++; return; }
     posted++;
     const g = parseFloat(r.gross)||0;
     // Money received (bank rows tagged IN) is totalled separately rather
@@ -3597,22 +3600,28 @@ function updateSummary() {
     net += calcNet(g, bu, r.home, r.acc, vat);
   });
   document.getElementById('statPost').textContent = posted;
-  document.getElementById('statExcl').textContent = excl;
   document.getElementById('statGross').textContent = '£'+gross.toFixed(2);
   document.getElementById('statNet').textContent = '£'+net.toFixed(2);
-  document.getElementById('statGrossLabel').textContent = anyIn ? 'Money out — gross' : 'Gross total';
+  document.getElementById('statGrossLabel').textContent = anyIn ? 'Money out' : 'Gross total';
   document.getElementById('statNetLabel').textContent = anyIn ? 'Money out — BU-adjusted' : 'BU-adjusted total';
   document.getElementById('statInCard').style.display = anyIn ? '' : 'none';
   document.getElementById('statIn').textContent = '£'+grossIn.toFixed(2);
+  const netMove = grossIn - gross;
+  document.getElementById('statNetMoveCard').style.display = anyIn ? '' : 'none';
+  document.getElementById('statNetMove').textContent = (netMove < 0 ? '−£' : '+£') + Math.abs(netMove).toFixed(2);
 }
 
 function refreshExportBtn() {
   const btn = document.getElementById('exportBtn');
   const active = rows.some(r => r.post==='YES');
   btn.disabled = !active;
-  document.getElementById('exportNote').textContent = active
-    ? rows.filter(r=>r.post==='YES').length + ' rows will be exported'
-    : '';
+  const incomeRows = rows.filter(r => r.post === 'YES' && r.direction === 'in').length;
+  const exported = rows.filter(r => r.post === 'YES').length - (exportType === 'bills' ? incomeRows : 0);
+  let note = active ? exported + ' rows will be exported' : '';
+  if (active && exportType === 'bills' && incomeRows) {
+    note += ` — ${incomeRows} income row${incomeRows !== 1 ? 's' : ''} left out, as Xero Bills are purchases only. Use Bank Statement CSV to include income.`;
+  }
+  document.getElementById('exportNote').textContent = note;
   refreshRefPlaceholders();
 }
 
