@@ -18,8 +18,8 @@
 (function () {
   if (window.claude && typeof window.claude.use === 'function') return;
 
-  const DEFAULT_MODEL = 'claude-opus-5';
-  const MAX_TOKENS = 32000;
+  const DEFAULT_MODEL = 'claude-sonnet-5';
+  const MAX_TOKENS = 64000;
   // Bundled copy of the official SDK (see README → "Updating the SDK").
   const SDK_URL = './vendor/anthropic-sdk-0.128.0.js';
   // Server-side refusal fallbacks: if the model's safety classifiers decline
@@ -157,7 +157,7 @@
       throw codedError('refused', 'Claude declined to process that input.');
     }
     if (message.stop_reason === 'max_tokens') {
-      throw codedError('prompt_too_large', 'The response was too long to finish — try splitting the file into smaller parts.');
+      throw codedError('output_too_long', "Claude's reply was too long to finish — try splitting the file into smaller parts.");
     }
     return message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
   }

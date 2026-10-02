@@ -569,6 +569,7 @@
   .raw-file-item .fstatus.duplicate { background: var(--amber-bg); color: var(--amber); }
   .raw-file-item { flex-wrap: wrap; }
   .raw-file-item .dup-note { flex-basis: 100%; font-size: 10.5px; color: var(--amber); margin-top: 2px; }
+  .raw-file-item .dup-note.fail-note { color: var(--red); }
   .raw-file-item .include-anyway {
     font-size: 10px; padding: 3px 9px; border-radius: 10px; flex-shrink: 0;
     border: 1px solid var(--amber); background: transparent; color: var(--amber); cursor: pointer;
@@ -622,7 +623,7 @@
     </div>
     <div class="field">
       <label>Claude model</label>
-      <input type="text" id="settingsModel" placeholder="claude-opus-5">
+      <input type="text" id="settingsModel" placeholder="claude-sonnet-5">
     </div>
     <button class="btn btn-primary" type="button" onclick="saveSettingsPanel()">Save</button>
   </div>
@@ -2400,6 +2401,14 @@ function renderUploadFileList() {
       note.textContent = item.duplicateOf;
       div.appendChild(note);
     }
+    // Why a file failed (or partly failed) — shown in full, not just on hover.
+    const problem = item.status === 'failed' ? item.error : (item.status === 'done' ? item.warning : null);
+    if (problem) {
+      const note = document.createElement('div');
+      note.className = 'dup-note' + (item.status === 'failed' ? ' fail-note' : '');
+      note.textContent = (item.status === 'failed' ? "Couldn't read this file: " : '⚠ ') + problem;
+      div.appendChild(note);
+    }
     list.appendChild(div);
   });
   refreshProcessAllBtn();
@@ -2607,8 +2616,37 @@ function mapChambersRowToInternal(aiRow) {
 // accounts reader does (extractTextFromXeroExport / callXeroFileExtraction
 // above), reusing the same chunking helpers for large statements.
 
-const BANK_STATEMENT_TEXT_LIMIT = 50000; // headroom under the 64KB sample() prompt cap
-const MAX_BANK_STATEMENT_CHUNKS = 10;    // safety cap on AI calls for one statement
+// A bank statement is sent to Claude in batches of transactions rather than
+// as one block: Claude writes a full JSON entry back for every transaction,
+// so a year's statement in one request runs past the reply length limit and
+// fails outright. Batches also run a few at a time to keep big files quick.
+const BANK_STATEMENT_ROWS_PER_CHUNK = 40;
+const BANK_STATEMENT_TEXT_LIMIT = 20000; // also cap by size, for very long lines
+const MAX_BANK_STATEMENT_CHUNKS = 40;    // safety cap: ~1,600 transactions per file
+const BANK_STATEMENT_PARALLEL = 3;
+
+// Splits CSV text into batches of at most `maxRows` data lines (and
+// `maxChars`), repeating the header line at the top of every batch so each
+// one makes sense on its own.
+function chunkCsvByRows(text, maxRows, maxChars) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+  if (!lines.length) return [];
+  const [header, ...body] = lines;
+  const chunks = [];
+  let current = [];
+  let size = header.length;
+  for (const line of body) {
+    if (current.length && (current.length >= maxRows || size + line.length + 1 > maxChars)) {
+      chunks.push([header, ...current].join('\n'));
+      current = [];
+      size = header.length;
+    }
+    current.push(line);
+    size += line.length + 1;
+  }
+  if (current.length) chunks.push([header, ...current].join('\n'));
+  return chunks;
+}
 
 function buildBankStatementExtractionSystemPrompt() {
   const coaText = buildChartOfAccountsText();
@@ -2716,25 +2754,64 @@ function mapBankRowToInternal(t) {
 // transactions doesn't blow the sample() prompt cap, and adds every
 // extracted transaction as a row via addRow()/mapBankRowToInternal.
 // `onProgress`, if given, is called with a short status string between chunks.
+// Returns { added, warning } — `warning` is set when some batches couldn't
+// be read, so the rows that did come through are kept and the gap is shown
+// next to the file. Throws only if nothing could be read at all.
 async function parseBankStatementCsvFile(file, onProgress) {
   const text = await readFileAsPlainText(file);
-  let chunks = chunkTextByLines(text, BANK_STATEMENT_TEXT_LIMIT);
+  let chunks = chunkCsvByRows(text, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
+  if (!chunks.length) throw new Error('The file is empty.');
   let capped = false;
   if (chunks.length > MAX_BANK_STATEMENT_CHUNKS) {
     chunks = chunks.slice(0, MAX_BANK_STATEMENT_CHUNKS);
     capped = true;
   }
+
+  // Read batches a few at a time, but add rows in statement order.
+  const results = new Array(chunks.length);
+  let next = 0, finished = 0;
+  const report = () => onProgress && onProgress(`Reading ${file.name}${chunks.length > 1 ? ` — ${finished} of ${chunks.length} parts done` : ''}…`);
+  report();
+  async function worker() {
+    while (next < chunks.length) {
+      const i = next++;
+      try {
+        results[i] = { rows: await callBankStatementExtraction(chunks[i]) };
+      } catch (e) {
+        results[i] = { error: e.message || String(e) };
+      }
+      finished++;
+      report();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(BANK_STATEMENT_PARALLEL, chunks.length) }, worker));
+
   let added = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    if (onProgress) onProgress(`Reading ${file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`);
-    const aiRows = await callBankStatementExtraction(chunks[i]);
-    aiRows.forEach(r => addRow(mapBankRowToInternal(r)));
-    added += aiRows.length;
+  const failed = [];
+  results.forEach((r, i) => {
+    if (r.error) { failed.push({ part: i + 1, error: r.error }); return; }
+    r.rows.forEach(t => addRow(mapBankRowToInternal(t)));
+    added += r.rows.length;
+  });
+  if (failed.length === chunks.length) throw new Error(failed[0].error);
+
+  const warnings = [];
+  if (failed.length) {
+    // Name the date span of each missing batch (first column of its first
+    // and last lines) so it can be checked against the statement — re-adding
+    // the whole file would duplicate the rows that did come through.
+    const spans = failed.map(f => {
+      const lines = chunks[f.part - 1].split('\n').slice(1);
+      const first = (lines[0] || '').split(',')[0].trim();
+      const last = (lines[lines.length - 1] || '').split(',')[0].trim();
+      return first === last ? first : `${first} – ${last}`;
+    });
+    warnings.push(`${failed.length} of ${chunks.length} parts couldn't be read (${failed[0].error.replace(/\.$/, '')}). The rest were added. Missing transactions: ${spans.join('; ')} — add those by hand or from a shorter statement for those dates.`);
   }
   if (capped) {
-    setAlert(`"${file.name}" is a large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS} sections were read. Check totals against the original, or split it and drop in the rest separately.`, 'warn');
+    warnings.push(`Very large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS * BANK_STATEMENT_ROWS_PER_CHUNK} transactions were read. Split it and add the rest separately.`);
   }
-  return added;
+  return { added, warning: warnings.join(' ') };
 }
 
 // Processes every queued file in order, routing by type:
@@ -2769,9 +2846,11 @@ async function processUnifiedQueue() {
         aiRows.forEach(r => addRow(mapChambersRowToInternal(r)));
         item.addedCount = aiRows.length;
       } else if (kind === 'bankcsv') {
-        item.addedCount = await parseBankStatementCsvFile(item.file, (msg) => {
+        const result = await parseBankStatementCsvFile(item.file, (msg) => {
           statusEl.textContent = msg;
         });
+        item.addedCount = result.added;
+        item.warning = result.warning || null;
       } else {
         throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, or .csv');
       }
@@ -2787,6 +2866,7 @@ async function processUnifiedQueue() {
   showTable();
   checkHomeRows();
   statusEl.textContent = `Done — processed ${done} file${done!==1?'s':''}.`;
+  return toProcess.filter(q => q.status === 'failed' || q.warning).length;
 }
 
 // ── COMBINED "Process files & email" BUTTON ─────────────────────────────────
@@ -2823,9 +2903,10 @@ async function processAll() {
   btn.disabled = true;
   const before = rows.length;
 
+  let filesWithProblems = 0;
   if (hasQueuedFiles) {
     setProcessAllStatus('Processing files…', 'info');
-    await processUnifiedQueue();
+    filesWithProblems = await processUnifiedQueue();
   }
   if (hasEmailText) {
     setProcessAllStatus('Extracting expenses from email…', 'info');
@@ -2833,7 +2914,12 @@ async function processAll() {
   }
 
   const addedTotal = rows.length - before;
-  setProcessAllStatus(`✓ Done — ${addedTotal} row${addedTotal!==1?'s':''} added.`, 'success');
+  const added = `${addedTotal} row${addedTotal!==1?'s':''} added`;
+  if (filesWithProblems) {
+    setProcessAllStatus(`⚠ ${added}, but ${filesWithProblems} file${filesWithProblems!==1?'s':''} had a problem — see the reason under the file above.`, 'warn');
+  } else {
+    setProcessAllStatus(`✓ Done — ${added}.`, 'success');
+  }
   refreshProcessAllBtn();
 }
 
