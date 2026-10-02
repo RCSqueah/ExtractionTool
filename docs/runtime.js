@@ -18,7 +18,7 @@
 (function () {
   if (window.claude && typeof window.claude.use === 'function') return;
 
-  const DEFAULT_MODEL = 'claude-opus-5';
+  const DEFAULT_MODEL = 'claude-sonnet-5';
   const MAX_TOKENS = 64000;
   // Bundled copy of the official SDK (see README → "Updating the SDK").
   const SDK_URL = './vendor/anthropic-sdk-0.128.0.js';
