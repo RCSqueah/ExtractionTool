@@ -400,19 +400,21 @@
   .history-select:focus { outline: none; border-color: var(--text); background: #fff; }
   .gross-cell { display: flex; align-items: center; gap: 4px; }
   .gross-cell input { min-width: 80px; }
-  .dir-tag {
+  .dir-sign {
     flex-shrink: 0;
+    width: 18px;
     border: none;
-    border-radius: 10px;
-    padding: 3px 7px;
+    background: none;
+    padding: 0;
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 9.5px;
+    font-size: 14px;
     font-weight: 500;
-    letter-spacing: 0.04em;
     cursor: pointer;
+    border-radius: 4px;
   }
-  .dir-tag.out { background: var(--surface2); color: var(--text-muted); }
-  .dir-tag.in  { background: var(--green-bg); color: var(--green); }
+  .dir-sign:hover { background: var(--surface2); }
+  .dir-sign.out { color: var(--text); }
+  .dir-sign.in  { color: var(--green); }
   tbody td input.money-in { color: var(--green); font-weight: 500; }
   .net-amt.money-in { color: var(--green); font-weight: 500; }
   tbody td input.notes-input { color: var(--amber); font-size: 11.5px; }
@@ -852,7 +854,7 @@
           <th style="min-width:110px" onclick="sortBy('supplier')" class="sortable" data-col="supplier">Supplier <span class="sort-ind" id="si-supplier"></span></th>
           <th style="min-width:300px" onclick="sortBy('desc')" class="sortable" data-col="desc">Description <span class="sort-ind" id="si-desc"></span></th>
           <th style="min-width:220px" title="Review notes from AI extraction and history checks — never included in the Xero CSV">Notes</th>
-          <th style="min-width:175px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
+          <th style="min-width:140px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
           <th style="width:100px">% BU</th>
           <th style="width:60px">Home</th>
           <th style="width:100px" class="text-right" onclick="sortBy('net')" class="sortable" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
@@ -2690,13 +2692,47 @@ Each element:
 }`;
 }
 
+// JSON schema for one batch of bank transactions, sent as a structured
+// output so every reply is guaranteed to parse. The prompt above describes
+// each field; this pins the exact shape. Objects must list every property
+// and set additionalProperties:false; nullable fields use anyOf with null.
+const nullable = t => ({ anyOf: [t, { type: 'null' }] });
+const BANK_TRANSACTIONS_SCHEMA = {
+  type: 'object',
+  properties: {
+    transactions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          date: nullable({ type: 'string' }),
+          payee: nullable({ type: 'string' }),
+          description: { type: 'string' },
+          amount: { type: 'number' },
+          direction: { type: 'string', enum: ['out', 'in'] },
+          accountCode: nullable({ type: 'string' }),
+          vatRate: nullable({ type: 'string', enum: VAT_RATES }),
+          likelyNonBusiness: { type: 'boolean' },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+          issues: { type: 'string' },
+        },
+        required: ['date', 'payee', 'description', 'amount', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'confidence', 'issues'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['transactions'],
+  additionalProperties: false,
+};
+
 async function callBankStatementExtraction(text) {
   const { sample } = await getCaps();
   if (!sample) throw new Error('Asking Claude is not available in this view.');
-  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nHere is the bank statement data:\n\n${text}`;
+  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nReturn the transactions as {"transactions": [ ... ]}, one entry per line of the data, in the shape described above.\n\nHere is the bank statement data:\n\n${text}`;
   let parsed;
   try {
-    parsed = await sample.json(prompt, { modelTier: 'default', cache: false });
+    parsed = await sample.json(prompt, { schema: BANK_TRANSACTIONS_SCHEMA, modelTier: 'default', cache: false });
+    if (parsed && Array.isArray(parsed.transactions)) parsed = parsed.transactions;
   } catch (e) {
     if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
     throw new Error(sampleErrorMessage(e));
@@ -3157,7 +3193,7 @@ function buildRowHTML(row) {
     <td><input type="text" value="${esc(row.supplier)}" onchange="setField(${id},'supplier',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Supplier"></td>
     <td><input type="text" value="${esc(row.desc)}" onchange="setField(${id},'desc',this.value)" onkeydown="if(event.key==='Enter')this.blur()" placeholder="Description"></td>
     <td class="no-strike"><input type="text" class="notes-input" value="${esc(row.notes)}" title="${esc(row.notes)}" onchange="setField(${id},'notes',this.value);this.title=this.value" onkeydown="if(event.key==='Enter')this.blur()" placeholder="—"></td>
-    <td><div class="gross-cell">${row.fromBank ? `<button type="button" class="dir-tag ${inRow ? 'in' : 'out'}" onclick="toggleDirection(${id})" title="${inRow ? 'Income — money received' : 'Money out (paid)'} — click to switch">${inRow ? 'INCOME' : 'OUT'}</button>` : ''}<input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"${inRow ? ' class="money-in"' : ''}></div></td>
+    <td><div class="gross-cell">${row.fromBank ? `<button type="button" class="dir-sign ${inRow ? 'in' : 'out'}" onclick="toggleDirection(${id})" title="${inRow ? 'Income — money received' : 'Money out (paid)'} — click to switch">${inRow ? '+' : '−'}</button>` : ''}<input type="number" step="0.01" value="${row.gross!==''?row.gross:''}" onchange="setField(${id},'gross',this.value);updateNet(${id})" onkeyup="updateNet(${id})" onkeydown="if(event.key==='Enter')this.blur()" placeholder="0.00"${inRow ? ' class="money-in"' : ''}></div></td>
     <td class="no-strike">
       <div class="bu-cell">
         <input type="number" min="0" max="100" step="1" value="${isHome213(row.acc) ? '' : (row.bu!==''?row.bu:'')}"

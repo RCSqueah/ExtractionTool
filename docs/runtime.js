@@ -121,6 +121,9 @@
     // API directly from the page is acceptable here; never ship a key in code.
     const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
     const params = { model, max_tokens: MAX_TOKENS, messages: [{ role: 'user', content }] };
+    // Structured outputs: with a JSON schema, the API guarantees the reply is
+    // valid JSON in exactly that shape (no stray quotes or truncated syntax).
+    if (opts.schema) params.output_config = { format: { type: 'json_schema', schema: opts.schema } };
 
     let message;
     try {
@@ -167,8 +170,15 @@
       return { images: true, documents: true };
     },
     text: askClaude,
+    // Retries once if the reply isn't valid JSON — rare, and usually fine on a
+    // second attempt. Calls that pass a schema get guaranteed-valid JSON.
     async json(prompt, opts = {}) {
-      return parseJsonLoose(await askClaude(prompt, opts));
+      try {
+        return parseJsonLoose(await askClaude(prompt, opts));
+      } catch (e) {
+        if (e.code !== 'invalid_json') throw e;
+        return parseJsonLoose(await askClaude(prompt, opts));
+      }
     },
   };
 
