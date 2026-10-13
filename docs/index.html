@@ -775,6 +775,10 @@
       "ignore anything from the personal credit card", "this client's mobile bill is 80% business use". Saved per client.
     </p>
     <textarea id="extraInstructionsBox" placeholder="e.g. Motor expenses should be at 50% business use…" rows="3" oninput="scheduleSaveExtraInstructions()"></textarea>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:12.5px;cursor:pointer;">
+      <input type="checkbox" id="flatRateBox" onchange="onFlatRateChange(this.checked)" disabled>
+      VAT Flat Rate Scheme — code all expenses as <strong>No VAT</strong> (income keeps its own rate). Saved per client.
+    </label>
     <div style="display:flex;gap:8px;margin-top:14px;align-items:center;">
       <button class="btn btn-primary" id="processAllBtn" onclick="processAll()">Process everything</button>
       <span id="processAllStatus" style="font-size:12px;color:var(--text-muted);"></span>
@@ -1027,6 +1031,7 @@ async function loadClientRules() {
   ACCOUNTS = [];
   VAT_DEFAULTS = {};
   currentExtraInstructions = '';
+  currentFlatRate = false;
 
   if (name) {
     const { db } = await getCaps();
@@ -1042,6 +1047,7 @@ async function loadClientRules() {
           if (data.coa && Array.isArray(data.coa.accounts)) ACCOUNTS = data.coa.accounts;
           if (data.coa && data.coa.vatDefaults && typeof data.coa.vatDefaults === 'object') VAT_DEFAULTS = data.coa.vatDefaults;
           if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
+          currentFlatRate = data.flatRate === true;
         }
       } catch (e) {
         // No history yet for this client — that's fine, starts empty.
@@ -1056,6 +1062,8 @@ async function loadClientRules() {
   document.getElementById('xeroCheckStatus').textContent = '';
   const box = document.getElementById('extraInstructionsBox');
   if (box) box.value = currentExtraInstructions;
+  const fr = document.getElementById('flatRateBox');
+  if (fr) { fr.checked = currentFlatRate; fr.disabled = !currentClientKey; }
   renderClientHistoryPanel();
   renderCoaPanel();
   refreshAllRows();
@@ -1076,6 +1084,7 @@ async function saveClientDoc() {
       rules: currentClientRules,
       coa: { accounts: ACCOUNTS, vatDefaults: VAT_DEFAULTS },
       notes: currentExtraInstructions,
+      flatRate: currentFlatRate,
     });
   } catch (e) {
     console.error('Could not save client data:', e);
@@ -1248,7 +1257,8 @@ function checkAgainstHistoryAndDefaults(acc, vatExplicit, supplier, desc) {
     if (vatExplicit && learned.vat && learned.vat !== vatExplicit) {
       notes.push(`this client's usual VAT here is ${learned.vat}, not ${vatExplicit}`);
     }
-  } else if (vatExplicit && vatExplicit !== stdVat) {
+  } else if (vatExplicit && vatExplicit !== stdVat && !(currentFlatRate && vatExplicit === 'No VAT')) {
+    // (On the Flat Rate Scheme, No VAT on an expense is expected, not a discrepancy.)
     notes.push(`differs from the standard default of ${stdVat} for this account`);
   }
 
@@ -1267,6 +1277,31 @@ function checkAgainstHistoryAndDefaults(acc, vatExplicit, supplier, desc) {
 // value and debounces a write, same pattern as the coding-history edits.
 let currentExtraInstructions = '';
 
+// Flat Rate Scheme clients reclaim no VAT on purchases, so every money-out
+// row is coded No VAT regardless of the account's default, the history or
+// Claude's suggestion. Income keeps its own rate. Saved per client.
+let currentFlatRate = false;
+
+function onFlatRateChange(checked) {
+  currentFlatRate = !!checked;
+  if (!currentClientKey) return;
+  scheduleSaveClientDoc();
+  // Apply to the rows already in the table, too.
+  if (currentFlatRate) {
+    rows.forEach(r => {
+      if (r.direction === 'in' || r.vat === 'No VAT') return;
+      r.vat = 'No VAT';
+      const tr = document.getElementById('tr_' + r.id);
+      if (tr) { tr.innerHTML = buildRowHTML(r); tr.classList.toggle('needs-attention', !r.acc || !r.vat); }
+    });
+    updateUI();
+  }
+}
+
+function flatRateVat(direction, vat) {
+  return currentFlatRate && direction !== 'in' ? 'No VAT' : vat;
+}
+
 function scheduleSaveExtraInstructions() {
   const box = document.getElementById('extraInstructionsBox');
   currentExtraInstructions = box ? box.value : '';
@@ -1278,7 +1313,8 @@ function scheduleSaveExtraInstructions() {
 // email extraction) whenever there's something to say — empty string (and
 // so no visible change to the prompt) if the box is blank.
 function extraInstructionsBlock() {
-  const text = (document.getElementById('extraInstructionsBox')?.value || '').trim();
+  let text = (document.getElementById('extraInstructionsBox')?.value || '').trim();
+  if (currentFlatRate) text = `${text ? text + '\n' : ''}This client is on the VAT Flat Rate Scheme: every expense (money out) is No VAT.`;
   if (!text) return '';
   return `\n\nADDITIONAL INSTRUCTIONS FOR THIS CLIENT — apply these when they're relevant to a line item; they override the general defaults above:\n${text}`;
 }
@@ -1983,7 +2019,8 @@ function parseFile(file) {
 
         const vatRaw = stripLegacyVatSuffix(r[2]);
         // Use exactly what the client provided — match to our VAT list, blank if unrecognised
-        const vatMatch = VAT_RATES.find(v => v.toLowerCase() === vatRaw.toLowerCase());
+        const vatMatchRaw = VAT_RATES.find(v => v.toLowerCase() === vatRaw.toLowerCase());
+        const vatMatch = vatMatchRaw ? flatRateVat('out', vatMatchRaw) : vatMatchRaw;
         // If the file didn't supply a usable VAT rate but we do know the account,
         // fall back to the same account-based default used when a user picks an
         // account manually from the dropdown (see onAccChange/defaultVat) — this
@@ -2591,7 +2628,8 @@ async function callChambersExtraction(file, kind) {
 function mapChambersRowToInternal(aiRow) {
   const found = aiRow.accountCode ? ACCOUNTS.find(a => a.code === String(aiRow.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
-  const modelVatExplicit = VAT_RATES.includes(aiRow.vatRate) ? aiRow.vatRate : null;
+  // On the Flat Rate Scheme the row will be No VAT, so check and learn that.
+  const modelVatExplicit = VAT_RATES.includes(aiRow.vatRate) ? flatRateVat('out', aiRow.vatRate) : null;
   const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
   const vat = supplierVatOverride(aiRow.supplier) || modelVat;
 
@@ -2736,6 +2774,11 @@ function parseBankStatementCsv(text) {
   return buildStatement(parseCsvText(text));
 }
 
+// The section heading a statement line sits under ('' if none).
+function statementSection(stmt, record) {
+  return stmt.header[0] === 'Section' ? (record[0] || '') : '';
+}
+
 // "£1,234.50", "-30.15", "(12.00)" → number; NaN if not an amount.
 function parseAmount(v) {
   let t = String(v ?? '').trim();
@@ -2852,12 +2895,12 @@ ${coaText}
 For each transaction:
 - "date" in YYYY-MM-DD format.
 - "payee" — the cleaned-up merchant/counterparty name (strip card masks, transaction reference numbers, and boilerplate like "VIA MOBILE - PYMT" or "FP dd/mm/yy" down to the actual person/company), or null if genuinely just a bank charge/fee with no counterparty.
-- "description" — a short, cleaned description of what the transaction actually was, in plain English (e.g. "Card payment — Vodafone mobile bill", "Direct debit — Barclaycard", "Bank charges").
+- "description" — a short, cleaned description of what the transaction actually was, in plain English (e.g. "Card payment — Vodafone mobile bill", "Direct debit — Barclaycard", "Bank charges"). When the line is under a Section heading, say what it was for using that heading — e.g. "Car fuel" under "Car Expenses", "Van tyres" under "Van Expenses".
 - "amount" — the transaction amount as a positive number (no currency symbols, no commas, no sign).
 - "direction" — "out" if money left the account (a debit/payment), "in" if money was received (a credit/deposit).
 - "accountCode" as above, or null.
 - "vatRate" — one of: ${VAT_RATES.join(', ')} — an expense rate for money out and an income rate for money in, following the account's default VAT shown above and this client's usual coding; null if not confidently known.
-- "businessUsePercent" — only when the line itself shows that just part of it is business use (e.g. a second amount that is a fixed fraction of the total, like -30.15 against -100.50 = 30%, or wording like "@ 30% business use"), or the client instructions below say so for this kind of cost: that percentage as a number (30). Otherwise null.
+- "businessUsePercent" — the business-use percentage as a number (e.g. 30) when only part of the cost is business use. Set it when the client instructions below give a percentage for this kind of cost or for its Section (e.g. "Car Expenses: 30% business use" applies to every line under the "Car Expenses" heading), or when the line itself shows it (a second amount that is a fixed fraction of the total, like -30.15 against -100.50 = 30%, or wording like "@ 30% business use"). Otherwise null.
 - "likelyNonBusiness" — true if this transaction is very likely NOT a business expense/income line that belongs in the accounts at all: transfers to the account holder themselves or a joint/personal account (e.g. "drawings", payments to a personal name with no clear business purpose), personal credit card repayments, HMRC self-assessment payments, loan/mortgage repayments on a personal basis, or anything that reads as the owner moving their own money around rather than the business trading. Genuine business expenses (subscriptions, suppliers, professional fees, bank charges, business rates, etc.) and genuine business income (client/customer payments) should be false.
 - "confidence" — "high" if the transaction is unambiguous, "medium" if you had to infer the nature of it, "low" if you are largely guessing.
 - "issues" — a short note if anything is unclear or worth flagging, empty string otherwise.
@@ -2926,19 +2969,20 @@ async function callBankStatementExtraction(text) {
 // (null if Claude's reply couldn't be matched to a line). It becomes the
 // Description that goes to Xero; Claude's plain-English version is kept in
 // Notes for reference only.
-function mapBankRowToInternal(t, original, fromFile) {
+function mapBankRowToInternal(t, original, fromFile, section) {
   // Amount and money in/out come from the file when its columns say so;
   // Claude's reading is only used when they don't.
   const direction = fromFile ? fromFile.direction : (t.direction === 'in' ? 'in' : 'out');
   const amount = fromFile ? fromFile.amount : t.amount;
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
-  const modelVatExplicit = VAT_RATES.includes(t.vatRate) ? t.vatRate : null;
+  const modelVatExplicit = VAT_RATES.includes(t.vatRate) ? flatRateVat(direction, t.vatRate) : null;
   const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
   const vat = supplierVatOverride(t.payee) || modelVat;
 
   const desc = original || t.description || '';
   const notes = [];
+  if (section) notes.push(section);
   if (!original) notes.push("Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
@@ -2953,6 +2997,11 @@ function mapBankRowToInternal(t, original, fromFile) {
   if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
     bu = Math.round(pct * 100) / 100;
     notes.push(`AI set business use to ${bu}% — verify`);
+  }
+  // Car costs are usually partly private: flag one that came through at
+  // 100% so it isn't exported in full by mistake.
+  if (!bu && direction === 'out' && /\bcar\b/i.test(section || '')) {
+    notes.push('Car expense — check business-use %');
   }
 
   if (accFull && modelVatExplicit) {
@@ -3034,7 +3083,7 @@ async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
       const matched = sent.has(n) && !seen.has(n);
       if (matched) seen.add(n);
       const rec = matched ? stmt.records[n - 1] : null;
-      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null));
+      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : ''));
       added++;
     });
     batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
@@ -3223,6 +3272,8 @@ function addRow(data) {
       notes = joinNotes([notes, 'Matches how this client is usually coded — verify']);
     }
   }
+
+  vat = flatRateVat(d.direction === 'in' ? 'in' : 'out', vat);
 
   rows.push({
     id,
@@ -3556,7 +3607,7 @@ function onAccChange(id, val) {
   row.acc = val;
   const dv = defaultVat(val);
   if (dv) {
-    row.vat = dv;
+    row.vat = flatRateVat(row.direction, dv);
   }
   const tr = document.getElementById('tr_'+id);
   if (tr) {
