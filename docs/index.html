@@ -942,9 +942,14 @@ function ensureStandardAccounts() {
 }
 ensureStandardAccounts();
 
+// Standard Xero UK tax rate names. Expense rates first; income and capital
+// purchase rates are for bank/transaction lists that include money in and
+// for clients on schemes like the Flat Rate Scheme.
 const VAT_RATES = [
   '20% (VAT on Expenses)', '5% (VAT on Expenses)',
   'Exempt Expenses', 'Zero Rated Expenses', 'No VAT',
+  '20% (VAT on Income)', '5% (VAT on Income)', 'Zero Rated Income', 'Exempt Income',
+  '20% (VAT on Capital Purchases)',
 ];
 
 let rows = [];
@@ -1474,14 +1479,16 @@ const XERO_EXPORT_TEXT_LIMIT = 55000; // enough for a year of transactions on mo
 function buildXeroFileExtractionSystemPrompt() {
   return `You are reading an export of a client's transaction history from Xero — e.g. an "Account Transactions" report, a bills/purchases export, or similar — covering roughly the last year. Reconstruct two things from it:
 
-1. The client's chart of accounts — every distinct expense/purchase account code and name actually used in this data. Use the exact code and name as they appear; don't rename or reclassify them.
+1. The client's chart of accounts — every distinct account code and name actually used in this data, including income/revenue accounts as well as expense ones. Use the exact code and name as they appear; don't rename or reclassify them.
 2. How recurring suppliers/expense types are normally coded — grouped by DISTINCT combination of supplier + account + tax rate, reported ONCE each (use the most recent occurrence's date/amount for a combination that recurs many times), not one row per transaction. A supplier billed to the same account/tax rate every month for a year should appear as a single entry, not twelve.
 
-Ignore any income, sales, or fee/billing rows — this tool only tracks purchases/expenses, not the client's own invoicing.
+Include money received as well as money spent: a customer or income source that's regularly coded to a revenue account (e.g. "Window Cleaning Clients" → Revenue) is a pattern worth reporting too.
 
-Also leave out of "items" any row whose contact/payee is a bookkeeping entry rather than a real supplier — manual journals, clearing or suspense accounts, transfers between the client's own accounts, opening/conversion balances, rounding. Their accounts can still go in "accounts".
+Leave out of "items" anything that isn't an ordinary day-to-day transaction: rows whose Source is "Manual Journal" (year-end adjustments, balancing figures, VAT return adjustments, capital allowance journals), and rows whose contact is a bookkeeping entry rather than a real supplier or customer — clearing or suspense accounts, transfers between the client's own accounts, opening/conversion balances, rounding. Their accounts can still go in "accounts".
 
-For the tax rate of each combination, map whatever tax rate name Xero uses to exactly one of these standard categories: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT. If you can't confidently map it, leave vatRate null rather than guessing.
+Where the same supplier is split between accounts by percentage (e.g. "Car Fuel @ 30% business use" to Motor Expenses and "@ 70% personal use" to Personal Use Adjustments), report the business-use account as the pattern and mention the split in "description".
+
+For the tax rate of each combination, use the tax rate name exactly as Xero shows it if it's one of these: ${VAT_RATES.join(', ')}. Otherwise map it to the closest one of those only if you're confident, else leave vatRate null.
 
 OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fences, no explanation before or after.
 
@@ -1493,7 +1500,7 @@ OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fence
       "description": "<a short, representative description for this combination>",
       "accountCode": "<the code from accounts above>",
       "accountName": "<the matching account name>",
-      "vatRate": "<one of the 5 categories above, or null>",
+      "vatRate": "<one of the tax rate names above, or null>",
       "date": "YYYY-MM-DD — the most recent occurrence of this combination",
       "amount": <number — the amount from that most recent occurrence>
     }
@@ -1503,6 +1510,24 @@ OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fence
 Keep "items" compact — one entry per distinct supplier+account+tax-rate combination, not per transaction.`;
 }
 
+// Structured-output schema for the Xero export reader, so its reply is
+// guaranteed to be valid JSON in this shape.
+const XERO_EXPORT_SCHEMA = (() => {
+  const nul = t => ({ anyOf: [t, { type: 'null' }] });
+  return {
+    type: 'object',
+    properties: {
+      accounts: { type: 'array', items: { type: 'object', properties: { code: { type: 'string' }, name: { type: 'string' } }, required: ['code', 'name'], additionalProperties: false } },
+      items: { type: 'array', items: { type: 'object', properties: {
+        supplier: { type: 'string' }, description: { type: 'string' }, accountCode: { type: 'string' }, accountName: { type: 'string' },
+        vatRate: nul({ type: 'string', enum: VAT_RATES }), date: nul({ type: 'string' }), amount: nul({ type: 'number' }),
+      }, required: ['supplier', 'description', 'accountCode', 'accountName', 'vatRate', 'date', 'amount'], additionalProperties: false } },
+    },
+    required: ['accounts', 'items'],
+    additionalProperties: false,
+  };
+})();
+
 async function callXeroFileExtraction(fileText) {
   const { sample } = await getCaps();
   if (!sample) {
@@ -1511,7 +1536,7 @@ async function callXeroFileExtraction(fileText) {
   const prompt = `${buildXeroFileExtractionSystemPrompt()}\n\nHere is the exported transaction data:\n\n${fileText}`;
   let parsed;
   try {
-    parsed = await sample.json(prompt, { modelTier: 'default', cache: false });
+    parsed = await sample.json(prompt, { schema: XERO_EXPORT_SCHEMA, modelTier: 'default', cache: false });
   } catch (e) {
     if (e && e.code === 'invalid_json') {
       throw new Error('Model did not return valid JSON: ' + e.message);
@@ -1600,6 +1625,9 @@ async function processXeroExportQueue() {
       // most of the file, split it into line-safe chunks and analyse each
       // one, merging the learned accounts/rules after every chunk.
       let chunks = chunkTextByLines(fullText, XERO_EXPORT_TEXT_LIMIT);
+      // Later parts would otherwise have no column headings to read by.
+      const headingLine = fullText.split('\n').find(l => /\bdate\b/i.test(l) && /account|contact|description/i.test(l));
+      if (headingLine) chunks = chunks.map((c, i) => (i === 0 || c.startsWith(headingLine)) ? c : `${headingLine}\n${c}`);
       let cappedNote = '';
       if (chunks.length > MAX_XERO_EXPORT_CHUNKS) {
         chunks = chunks.slice(0, MAX_XERO_EXPORT_CHUNKS);
@@ -2652,26 +2680,129 @@ function parseCsvText(text) {
   return rows;
 }
 
-// Reads a bank statement CSV into its own rows, so the original wording
-// can be taken from the file itself rather than from Claude's reply.
-// Returns { header, records, descCol, dateCol }. Banks put a few lines of
-// account details above the column headings, so the header is the first
-// row (within the first 15) that has a "date" column.
-function parseBankStatementCsv(text) {
-  const all = parseCsvText(text)
-    .map(r => r.map(c => c.trim()))
+// Reads a statement — a bank CSV, or a spreadsheet laid out the same way
+// (e.g. a client's own list in Xero's bank-import format) — into its own
+// rows, so the original wording and amounts can be taken from the file
+// itself rather than from Claude's reply. Banks put a few lines of account
+// details above the column headings, so the header is the first row
+// (within the first 15) with a "date" column. A row with text only in its
+// first cell (e.g. "Van Expenses") is a section heading: it isn't a
+// transaction, but its name is passed along with the rows under it.
+function buildStatement(allRows) {
+  const all = allRows
+    .map(r => r.map(c => String(c ?? '').trim()))
     .filter(r => r.some(c => c !== ''));
-  if (!all.length) return { header: [], records: [], descCol: -1, dateCol: -1 };
+  const empty = { header: [], records: [], descCol: -1, dateCol: -1, amountCol: -1, inCol: -1, outCol: -1 };
+  if (!all.length) return empty;
   let headerIdx = all.slice(0, 15).findIndex(r => r.some(c => /\bdate\b/i.test(c) && c.length < 30));
   if (headerIdx < 0) headerIdx = 0;
-  const header = all[headerIdx];
-  const records = all.slice(headerIdx + 1);
+  const baseHeader = all[headerIdx].map(h => h.replace(/^\*/, ''));
   const exact = /^(transaction )?(description|details|narrative|memo|particulars)$/i;
   const loose = /descr|detail|narrat|memo|particular/i;
-  let descCol = header.findIndex(h => exact.test(h));
-  if (descCol < 0) descCol = header.findIndex(h => loose.test(h));
-  const dateCol = Math.max(0, header.findIndex(h => /\bdate\b/i.test(h)));
-  return { header, records, descCol, dateCol };
+  let descCol = baseHeader.findIndex(h => exact.test(h));
+  if (descCol < 0) descCol = baseHeader.findIndex(h => loose.test(h));
+  const dateCol = Math.max(0, baseHeader.findIndex(h => /\bdate\b/i.test(h)));
+  const amountCol = baseHeader.findIndex(h => /^(amount|value|transaction amount|amount \(gbp\)|amount gbp)$/i.test(h));
+  const outCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid out|money out|debit|withdrawal/i.test(h));
+  const inCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid in|money in|credit|deposit/i.test(h));
+
+  const records = [];
+  let section = '', anySection = false;
+  for (const r of all.slice(headerIdx + 1)) {
+    const filled = r.filter(c => c !== '');
+    if (filled.length === 1 && r[0] !== '' && isNaN(parseAmount(r[0])) && !/\d{1,2}[\/\-.]\d{1,2}/.test(r[0])) {
+      section = r[0]; anySection = true; continue;
+    }
+    records.push({ cells: r, section });
+  }
+  const header = anySection ? ['Section', ...baseHeader] : baseHeader;
+  const shift = anySection ? 1 : 0;
+  return {
+    header,
+    records: records.map(x => anySection ? [x.section, ...x.cells] : x.cells),
+    descCol: descCol < 0 ? -1 : descCol + shift,
+    dateCol: dateCol + shift,
+    amountCol: amountCol < 0 ? -1 : amountCol + shift,
+    inCol: inCol < 0 ? -1 : inCol + shift,
+    outCol: outCol < 0 ? -1 : outCol + shift,
+  };
+}
+
+function parseBankStatementCsv(text) {
+  return buildStatement(parseCsvText(text));
+}
+
+// "£1,234.50", "-30.15", "(12.00)" → number; NaN if not an amount.
+function parseAmount(v) {
+  let t = String(v ?? '').trim();
+  if (!t) return NaN;
+  let neg = false;
+  if (/^\(.*\)$/.test(t)) { neg = true; t = t.slice(1, -1); }
+  t = t.replace(/[£$€,\s]/g, '');
+  if (/^-/.test(t)) { neg = !neg; t = t.slice(1); }
+  if (!/^\d+(\.\d+)?$/.test(t)) return NaN;
+  return (neg ? -1 : 1) * parseFloat(t);
+}
+
+// The amount and direction for a statement line, read from the file when it
+// has a signed Amount/Value column or separate money-in/money-out columns.
+// Returns null when the file's layout doesn't say, and Claude's reading is
+// used instead.
+function statementAmount(stmt, record) {
+  if (stmt.amountCol >= 0) {
+    const a = parseAmount(record[stmt.amountCol]);
+    if (!isNaN(a)) return { amount: Math.abs(a), direction: a < 0 ? 'out' : 'in' };
+  }
+  if (stmt.inCol >= 0 || stmt.outCol >= 0) {
+    const o = stmt.outCol >= 0 ? parseAmount(record[stmt.outCol]) : NaN;
+    const i = stmt.inCol >= 0 ? parseAmount(record[stmt.inCol]) : NaN;
+    if (!isNaN(o) && o !== 0) return { amount: Math.abs(o), direction: 'out' };
+    if (!isNaN(i) && i !== 0) return { amount: Math.abs(i), direction: 'in' };
+  }
+  return null;
+}
+
+// Reads every row of a spreadsheet's first sheet as text, with Excel date
+// cells turned into YYYY-MM-DD (from the date parts, so no time-zone shift).
+async function readSheetRows(file) {
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellNF: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const rows = [];
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    const row = [];
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+      if (!cell || cell.v === undefined || cell.v === null) { row.push(''); continue; }
+      if (cell.t === 'n' && cell.z && XLSX.SSF.is_date(cell.z)) {
+        const d = XLSX.SSF.parse_date_code(cell.v);
+        row.push(`${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`);
+      } else if (cell.t === 'd' && cell.v instanceof Date) {
+        const d = cell.v;
+        row.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+      } else {
+        row.push(String(cell.v));
+      }
+    }
+    rows.push(row);
+  }
+  return { rows, sheetNames: wb.SheetNames };
+}
+
+// True when a spreadsheet is a transaction list (Date + Amount-type
+// columns, like a bank export or Xero's bank-import layout) rather than the
+// firm's own expense template (whose header row starts "Post" / "Type of
+// expense").
+function looksLikeStatementSheet(rows, sheetNames) {
+  if (sheetNames.includes('Expenses') || sheetNames.includes('MTD Template')) return false;
+  for (const r of rows.slice(0, 15)) {
+    const cells = r.map(c => String(c || '').trim().replace(/^\*/, '').toLowerCase());
+    if (cells[0]?.startsWith('post') && (cells[1] || '').includes('account')) return false;
+    const hasDate = cells.some(c => /\bdate\b/.test(c) && c.length < 30);
+    const hasAmount = cells.some(c => /^(amount|value|paid in|paid out|money in|money out|debit|credit)\b/.test(c));
+    if (hasDate && hasAmount) return true;
+  }
+  return false;
 }
 
 // The bank's own wording for a statement line: its Description column,
@@ -2707,11 +2838,11 @@ function statementBatchText(stmt, lineNos) {
 
 function buildBankStatementExtractionSystemPrompt() {
   const coaText = buildChartOfAccountsText();
-  return `You are reading a raw bank/current-account statement export (CSV) for a UK self-employed professional's bookkeeping, for import into a Xero-style expense tracker. It is NOT a pre-filtered expense list — it is every transaction on the account, both money in and money out, usually with columns similar to Date, Type (e.g. POS, D/D, DPC, BAC, CHG), Description, Value (signed amount), Balance. Column names and order can vary by bank; work out the shape from whatever header row or pattern is present.
+  return `You are reading a list of transactions for a UK self-employed person's bookkeeping, for import into Xero. It is usually a raw bank/current-account statement export (columns similar to Date, Type (e.g. POS, D/D, DPC, BAC, CHG), Description, Value (signed amount), Balance), but it can also be a client's own transaction list in Xero's bank-import layout (Date, Amount, Payee, Description, Reference), sometimes grouped under section headings, which appear in a "Section" column (e.g. "Van Expenses", "Car Expenses"). It includes both money in and money out. Column names and order vary; work out the shape from the header row.
 
-Extract EVERY transaction line as its own row — do not skip or merge any, and do not filter anything out yourself (the tool marks things for exclusion afterwards, you just report them accurately).
+Extract EVERY transaction line as its own row — do not skip or merge any, and do not filter anything out yourself.
 
-CHART OF ACCOUNTS (choose the single best-fit code only if you are confident which business expense category a transaction belongs to; use the exact code shown; leave accountCode null if unsure or if the chart is empty):
+CHART OF ACCOUNTS (choose the single best-fit code only if you are confident — for money out the expense category, for money in the income account such as Revenue for customer receipts; use the exact code shown; leave accountCode null if unsure or if the chart is empty). Use the Section heading as a strong hint (e.g. "Van Expenses" and "Car Expenses" are motor expenses):
 ${coaText}
 
 For each transaction:
@@ -2721,28 +2852,15 @@ For each transaction:
 - "amount" — the transaction amount as a positive number (no currency symbols, no commas, no sign).
 - "direction" — "out" if money left the account (a debit/payment), "in" if money was received (a credit/deposit).
 - "accountCode" as above, or null.
-- "vatRate" — one of: 20% (VAT on Expenses), 5% (VAT on Expenses), Exempt Expenses, Zero Rated Expenses, No VAT — only if confidently known from the account chosen, else null.
+- "vatRate" — one of: ${VAT_RATES.join(', ')} — an expense rate for money out and an income rate for money in, following the account's default VAT shown above and this client's usual coding; null if not confidently known.
+- "businessUsePercent" — only when the line itself shows that just part of it is business use (e.g. a second amount that is a fixed fraction of the total, like -30.15 against -100.50 = 30%, or wording like "@ 30% business use"), or the client instructions below say so for this kind of cost: that percentage as a number (30). Otherwise null.
 - "likelyNonBusiness" — true if this transaction is very likely NOT a business expense/income line that belongs in the accounts at all: transfers to the account holder themselves or a joint/personal account (e.g. "drawings", payments to a personal name with no clear business purpose), personal credit card repayments, HMRC self-assessment payments, loan/mortgage repayments on a personal basis, or anything that reads as the owner moving their own money around rather than the business trading. Genuine business expenses (subscriptions, suppliers, professional fees, bank charges, business rates, etc.) and genuine business income (client/customer payments) should be false.
 - "confidence" — "high" if the transaction is unambiguous, "medium" if you had to infer the nature of it, "low" if you are largely guessing.
 - "issues" — a short note if anything is unclear or worth flagging, empty string otherwise.
 
 Never invent a figure that is not visible in the data.${extraInstructionsBlock()}
 
-OUTPUT — respond with ONLY a JSON array, one element per transaction line, in the same order they appear. No markdown, no preamble, no code fences, no explanation before or after. If nothing extractable is found, return [].
-
-Each element:
-{
-  "date": "YYYY-MM-DD" or null,
-  "payee": "<string>" or null,
-  "description": "<string>",
-  "amount": <number>,
-  "direction": "out" | "in",
-  "accountCode": "<one of the codes above>" or null,
-  "vatRate": "<one of the 5 categories above>" or null,
-  "likelyNonBusiness": true | false,
-  "confidence": "high" | "medium" | "low",
-  "issues": "<string, empty if none>"
-}`;
+OUTPUT — one entry per transaction line, in the same order they appear.`;
 }
 
 // JSON schema for one batch of bank transactions, sent as a structured
@@ -2767,10 +2885,11 @@ const BANK_TRANSACTIONS_SCHEMA = {
           accountCode: nullable({ type: 'string' }),
           vatRate: nullable({ type: 'string', enum: VAT_RATES }),
           likelyNonBusiness: { type: 'boolean' },
+          businessUsePercent: nullable({ type: 'number' }),
           confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
           issues: { type: 'string' },
         },
-        required: ['line', 'date', 'payee', 'description', 'amount', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'confidence', 'issues'],
+        required: ['line', 'date', 'payee', 'description', 'amount', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'businessUsePercent', 'confidence', 'issues'],
         additionalProperties: false,
       },
     },
@@ -2803,8 +2922,11 @@ async function callBankStatementExtraction(text) {
 // (null if Claude's reply couldn't be matched to a line). It becomes the
 // Description that goes to Xero; Claude's plain-English version is kept in
 // Notes for reference only.
-function mapBankRowToInternal(t, original) {
-  const direction = t.direction === 'in' ? 'in' : 'out';
+function mapBankRowToInternal(t, original, fromFile) {
+  // Amount and money in/out come from the file when its columns say so;
+  // Claude's reading is only used when they don't.
+  const direction = fromFile ? fromFile.direction : (t.direction === 'in' ? 'in' : 'out');
+  const amount = fromFile ? fromFile.amount : t.amount;
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
   const modelVatExplicit = VAT_RATES.includes(t.vatRate) ? t.vatRate : null;
@@ -2820,9 +2942,18 @@ function mapBankRowToInternal(t, original) {
   if (t.confidence && t.confidence !== 'high') notes.push(`AI ${t.confidence} confidence — verify`);
   if (t.issues) notes.push(t.issues);
 
+  // A business-use split shown in the line itself (e.g. a car fuel line
+  // with a 30% business figure next to it) — never on Use of Home rows.
+  let bu = '';
+  const pct = Number(t.businessUsePercent);
+  if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
+    bu = Math.round(pct * 100) / 100;
+    notes.push(`AI set business use to ${bu}% — verify`);
+  }
+
   if (accFull && modelVatExplicit) {
     notes.push(checkAgainstHistoryAndDefaults(accFull, modelVatExplicit, t.payee, t.description));
-    if (t.confidence === 'high' && direction === 'out' && !t.likelyNonBusiness) {
+    if (t.confidence === 'high' && !t.likelyNonBusiness) {
       recordClientRule(t.payee, t.description, accFull, modelVatExplicit);
     }
   }
@@ -2836,8 +2967,8 @@ function mapBankRowToInternal(t, original) {
     supplier: t.payee || '',
     desc: desc,
     notes: joinNotes(notes),
-    gross: (t.amount === null || t.amount === undefined || isNaN(Number(t.amount))) ? '' : Math.abs(Number(t.amount)),
-    bu: '',
+    gross: (amount === null || amount === undefined || isNaN(Number(amount))) ? '' : Math.abs(Number(amount)),
+    bu: bu,
     home: false,
     direction: direction,
     fromBank: true,
@@ -2852,9 +2983,8 @@ function mapBankRowToInternal(t, original) {
 // Returns { added, warning } — `warning` is set when some batches couldn't
 // be read, so the rows that did come through are kept and the gap is shown
 // next to the file. Throws only if nothing could be read at all.
-async function parseBankStatementCsvFile(file, onProgress) {
-  const text = await readFileAsPlainText(file);
-  const stmt = parseBankStatementCsv(text);
+async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
+  const stmt = preparedStmt || parseBankStatementCsv(await readFileAsPlainText(file));
   if (!stmt.records.length) throw new Error('No transactions found in the file.');
   let batches = batchStatementLines(stmt, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
   let capped = false;
@@ -2899,7 +3029,8 @@ async function parseBankStatementCsvFile(file, onProgress) {
       const n = Number(t.line);
       const matched = sent.has(n) && !seen.has(n);
       if (matched) seen.add(n);
-      addRow(mapBankRowToInternal(t, matched ? originalBankDescription(stmt, stmt.records[n - 1]) : null));
+      const rec = matched ? stmt.records[n - 1] : null;
+      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null));
       added++;
     });
     batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
@@ -2953,7 +3084,18 @@ async function processUnifiedQueue() {
     const kind = uploadFileKind(item.file);
     try {
       if (kind === 'xlsx') {
-        item.addedCount = await parseFile(item.file);
+        // A spreadsheet that's a transaction list (Date + Amount columns)
+        // rather than the firm's expense template goes through the same
+        // line-by-line reader as a bank CSV.
+        const sheet = await readSheetRows(item.file);
+        if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
+          const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, buildStatement(sheet.rows));
+          item.addedCount = result.added;
+          item.warning = result.warning || null;
+          if (result.added) setExportType('bank');
+        } else {
+          item.addedCount = await parseFile(item.file);
+        }
       } else if (kind === 'msg') {
         item.addedCount = await parseMsgFile(item.file);
       } else if (kind === 'pdf' || kind === 'image') {
