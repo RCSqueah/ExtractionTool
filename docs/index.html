@@ -692,6 +692,7 @@
       export (.csv or .xlsx). Claude reads it once to build this client's own chart of accounts below, and to learn which account each recurring
       supplier or expense type is normally coded to. This only needs doing once per client: it's saved and reloaded automatically whenever this
       client is selected again, and dropping in a newer export later just adds anything new.
+      You don't need to press "Process Xero export" first: <strong>Process everything</strong> in step ② reads a waiting Xero export before the client's documents.
     </p>
     <div class="drop-zone" id="xeroExportDropZone" style="padding:30px;">
       <input type="file" id="xeroExportFileInput" accept=".csv,.xlsx,.xls,.txt" multiple>
@@ -775,7 +776,7 @@
     </p>
     <textarea id="extraInstructionsBox" placeholder="e.g. Motor expenses should be at 50% business use…" rows="3" oninput="scheduleSaveExtraInstructions()"></textarea>
     <div style="display:flex;gap:8px;margin-top:14px;align-items:center;">
-      <button class="btn btn-primary" id="processAllBtn" onclick="processAll()">Process files &amp; email</button>
+      <button class="btn btn-primary" id="processAllBtn" onclick="processAll()">Process everything</button>
       <span id="processAllStatus" style="font-size:12px;color:var(--text-muted);"></span>
     </div>
   </div>
@@ -1598,6 +1599,7 @@ function renderXeroExportFileList() {
   });
   const btn = document.getElementById('processXeroExportBtn');
   if (btn) btn.disabled = xeroExportQueue.every(q => q.status !== 'queued');
+  refreshProcessAllBtn();
 }
 
 async function processXeroExportQueue() {
@@ -1606,7 +1608,7 @@ async function processXeroExportQueue() {
   const nameNow = document.getElementById('clientName').value.trim();
   if (!nameNow) {
     statusEl.textContent = 'Select or add a client above first, so this chart of accounts is saved against them.';
-    return;
+    return null;
   }
   if (nameNow !== currentClientKey) await loadClientRules();
 
@@ -1675,6 +1677,7 @@ async function processXeroExportQueue() {
   // "Process" only touches ones that failed or were added since.
   xeroExportQueue = xeroExportQueue.filter(q => q.status !== 'done');
   renderXeroExportFileList();
+  return { processed: toProcess.length, failed: toProcess.filter(q => q.status === 'error').length, accounts: ACCOUNTS.length, rules: totalRules };
 }
 
 // Splits text into chunks of at most maxChars, breaking only on line
@@ -3129,7 +3132,7 @@ async function processUnifiedQueue() {
   return toProcess.filter(q => q.status === 'failed' || q.warning).length;
 }
 
-// ── COMBINED "Process files & email" BUTTON ─────────────────────────────────
+// ── COMBINED "Process everything" BUTTON ────────────────────────────────────
 // One button below the notes box runs whichever of the two sources above
 // actually has something queued: files waiting in the drop-zone queue,
 // pasted email text, or both. Each source's own status line (unifiedStatus /
@@ -3147,15 +3150,17 @@ function refreshProcessAllBtn() {
   if (!btn) return;
   const hasQueuedFiles = uploadQueue.some(q => q.status === 'queued');
   const hasEmailText = document.getElementById('emailPasteBox').value.trim().length > 0;
-  btn.disabled = !hasQueuedFiles && !hasEmailText;
+  const hasQueuedXero = xeroExportQueue.some(q => q.status === 'queued');
+  btn.disabled = !hasQueuedFiles && !hasEmailText && !hasQueuedXero;
 }
 
 async function processAll() {
   const btn = document.getElementById('processAllBtn');
   const hasQueuedFiles = uploadQueue.some(q => q.status === 'queued');
   const hasEmailText = document.getElementById('emailPasteBox').value.trim().length > 0;
+  const hasQueuedXero = xeroExportQueue.some(q => q.status === 'queued');
 
-  if (!hasQueuedFiles && !hasEmailText) {
+  if (!hasQueuedFiles && !hasEmailText && !hasQueuedXero) {
     setProcessAllStatus('Add a file above or paste some email text first.', 'warn');
     return;
   }
@@ -3164,9 +3169,22 @@ async function processAll() {
   const before = rows.length;
 
   let filesWithProblems = 0;
+  // Step 1 first: a waiting Xero export builds the chart of accounts and
+  // coding history that reading the documents below relies on.
+  let xeroResult = null;
+  if (hasQueuedXero) {
+    setProcessAllStatus("Reading the Xero export (step ①)…", 'info');
+    xeroResult = await processXeroExportQueue();
+    if (!xeroResult) {
+      setProcessAllStatus('Select or add a client at the top first, so their Xero history is saved against them.', 'warn');
+      refreshProcessAllBtn();
+      return;
+    }
+    filesWithProblems += xeroResult.failed;
+  }
   if (hasQueuedFiles) {
     setProcessAllStatus('Processing files…', 'info');
-    filesWithProblems = await processUnifiedQueue();
+    filesWithProblems += await processUnifiedQueue();
   }
   if (hasEmailText) {
     setProcessAllStatus('Extracting expenses from email…', 'info');
@@ -3174,9 +3192,10 @@ async function processAll() {
   }
 
   const addedTotal = rows.length - before;
-  const added = `${addedTotal} row${addedTotal!==1?'s':''} added`;
+  const xeroPart = xeroResult ? `Xero history read (${xeroResult.accounts} accounts, ${xeroResult.rules} coding rules) · ` : '';
+  const added = `${xeroPart}${addedTotal} row${addedTotal!==1?'s':''} added`;
   if (filesWithProblems) {
-    setProcessAllStatus(`⚠ ${added}, but ${filesWithProblems} file${filesWithProblems!==1?'s':''} had a problem — see the reason under the file above.`, 'warn');
+    setProcessAllStatus(`⚠ ${added}, but ${filesWithProblems} file${filesWithProblems!==1?'s':''} had a problem — see the reason under the file.`, 'warn');
   } else {
     setProcessAllStatus(`✓ Done — ${added}.`, 'success');
   }
