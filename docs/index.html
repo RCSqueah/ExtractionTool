@@ -2541,6 +2541,14 @@ function renderUploadFileList() {
       inc.addEventListener('click', () => includeAnyway(item.id));
       div.appendChild(inc);
     }
+    if (item.retry && item.status !== 'working') {
+      const again = document.createElement('button');
+      again.type = 'button'; again.className = 'include-anyway';
+      again.textContent = '↻ Retry missing parts';
+      again.title = 'Read only the parts that failed — rows already added are not duplicated';
+      again.addEventListener('click', () => retryMissingParts(item.id));
+      div.appendChild(again);
+    }
     const rm = document.createElement('button');
     rm.className = 'fremove'; rm.type = 'button'; rm.innerHTML = '&times;';
     rm.title = 'Remove from queue';
@@ -2774,7 +2782,7 @@ function mapChambersRowToInternal(aiRow) {
 const BANK_STATEMENT_ROWS_PER_CHUNK = 40;
 const BANK_STATEMENT_TEXT_LIMIT = 20000; // also cap by size, for very long lines
 const MAX_BANK_STATEMENT_CHUNKS = 40;    // safety cap: ~1,600 transactions per file
-const BANK_STATEMENT_PARALLEL = 3;
+const BANK_STATEMENT_PARALLEL = 2;
 
 // Splits CSV text into rows of cells, exactly as written: handles quoted
 // cells (with commas, doubled "" quotes or line breaks inside) and CRLF.
@@ -3113,20 +3121,13 @@ function mapBankRowToInternal(t, original, fromFile, section) {
 // Returns { added, warning } — `warning` is set when some batches couldn't
 // be read, so the rows that did come through are kept and the gap is shown
 // next to the file. Throws only if nothing could be read at all.
-async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
-  const stmt = preparedStmt || parseBankStatementCsv(await readFileAsPlainText(file));
-  if (!stmt.records.length) throw new Error('No transactions found in the file.');
-  let batches = batchStatementLines(stmt, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
-  let capped = false;
-  if (batches.length > MAX_BANK_STATEMENT_CHUNKS) {
-    batches = batches.slice(0, MAX_BANK_STATEMENT_CHUNKS);
-    capped = true;
-  }
-
-  // Read batches a few at a time, but add rows in statement order.
+// Reads the given batches of statement lines with Claude, a couple at a
+// time, and adds their rows in statement order. Returns what was added,
+// which batches failed (with why), and lines Claude's replies left out.
+async function readStatementBatches(stmt, batches, label, onProgress) {
   const results = new Array(batches.length);
   let next = 0, finished = 0;
-  const report = () => onProgress && onProgress(`Reading ${file.name}${batches.length > 1 ? ` — ${finished} of ${batches.length} parts done` : ''}…`);
+  const report = () => onProgress && onProgress(`Reading ${label}${batches.length > 1 ? ` — ${finished} of ${batches.length} parts done` : ''}…`);
   report();
   async function worker() {
     while (next < batches.length) {
@@ -3141,12 +3142,6 @@ async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(BANK_STATEMENT_PARALLEL, batches.length) }, worker));
-
-  const dateOf = n => (stmt.records[n - 1] || [])[stmt.dateCol] || `line ${n}`;
-  const span = nums => {
-    const a = dateOf(nums[0]), b = dateOf(nums[nums.length - 1]);
-    return a === b ? a : `${a} – ${b}`;
-  };
 
   let added = 0;
   const failed = [];
@@ -3165,29 +3160,84 @@ async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
     });
     batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
   });
-  if (failed.length === batches.length) throw new Error(failed[0].error);
+  return { added, failed, skipped };
+}
 
-  const warnings = [];
-  if (failed.length) {
-    // Name the date span of each missing batch so it can be checked against
-    // the statement — re-adding the whole file would duplicate the rows
-    // that did come through.
-    warnings.push(`${failed.length} of ${batches.length} parts couldn't be read (${failed[0].error.replace(/\.$/, '')}). The rest were added. Missing transactions: ${failed.map(f => span(f.lines)).join('; ')} — add those by hand or from a shorter statement for those dates.`);
+// The warning shown under the file for batches that couldn't be read.
+function statementFailedWarning(stmt, failed, totalBatches) {
+  if (!failed.length) return '';
+  const dateOf = n => (stmt.records[n - 1] || [])[stmt.dateCol] || `line ${n}`;
+  const span = nums => { const a = dateOf(nums[0]), b = dateOf(nums[nums.length - 1]); return a === b ? a : `${a} – ${b}`; };
+  return `${failed.length} of ${totalBatches} parts couldn't be read (${failed[0].error.replace(/\.$/, '')}). The rest were added. Missing transactions: ${failed.map(f => span(f.lines)).join('; ')} — press "Retry missing parts" to read just those.`;
+}
+
+// Returns { added, warning, retry } — `retry` holds what's needed to re-read
+// only the parts that failed (see retryMissingParts), so nothing that did
+// come through is added twice. Throws only if nothing could be read at all
+// (with the same retry info attached).
+async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
+  const stmt = preparedStmt || parseBankStatementCsv(await readFileAsPlainText(file));
+  if (!stmt.records.length) throw new Error('No transactions found in the file.');
+  let batches = batchStatementLines(stmt, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
+  let capped = false;
+  if (batches.length > MAX_BANK_STATEMENT_CHUNKS) {
+    batches = batches.slice(0, MAX_BANK_STATEMENT_CHUNKS);
+    capped = true;
   }
+
+  const { added, failed, skipped } = await readStatementBatches(stmt, batches, file.name, onProgress);
+  const retry = failed.length ? { stmt, batches: failed.map(f => f.lines), totalBatches: batches.length } : null;
+  if (failed.length === batches.length) {
+    const err = new Error(failed[0].error);
+    err.retry = retry;
+    throw err;
+  }
+
   // Lines Claude's reply didn't account for (only counted within batches
   // that were read) — listed so nothing goes missing silently.
-  const unreadSkipped = skipped.filter(n => !failed.some(f => f.lines.includes(n)));
-  if (unreadSkipped.length) {
-    const list = unreadSkipped.slice(0, 8).map(n => `${dateOf(n)} ${originalBankDescription(stmt, stmt.records[n - 1]).slice(0, 40)}`).join('; ');
-    warnings.push(`${unreadSkipped.length} statement line${unreadSkipped.length !== 1 ? 's were' : ' was'} not returned by Claude: ${list}${unreadSkipped.length > 8 ? '; …' : ''} — add ${unreadSkipped.length !== 1 ? 'these' : 'it'} by hand.`);
+  const other = [];
+  if (skipped.length) {
+    const list = skipped.slice(0, 8).map(n => `${(stmt.records[n - 1] || [])[stmt.dateCol] || ''} ${originalBankDescription(stmt, stmt.records[n - 1]).slice(0, 40)}`).join('; ');
+    other.push(`${skipped.length} statement line${skipped.length !== 1 ? 's were' : ' was'} not returned by Claude: ${list}${skipped.length > 8 ? '; …' : ''} — add ${skipped.length !== 1 ? 'these' : 'it'} by hand.`);
   }
   if (stmt.descCol < 0) {
-    warnings.push("No Description column was found in this file, so each row's Description is the whole statement line.");
+    other.push("No Description column was found in this file, so each row's Description is the whole statement line.");
   }
   if (capped) {
-    warnings.push(`Very large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS * BANK_STATEMENT_ROWS_PER_CHUNK} transactions were read. Split it and add the rest separately.`);
+    other.push(`Very large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS * BANK_STATEMENT_ROWS_PER_CHUNK} transactions were read. Split it and add the rest separately.`);
   }
-  return { added, warning: warnings.join(' ') };
+  if (retry) retry.otherWarning = other.join(' ');
+  return { added, warning: [statementFailedWarning(stmt, failed, batches.length), ...other].filter(Boolean).join(' '), retry };
+}
+
+// "Retry missing parts" on a file: re-reads only the batches that failed,
+// adding just those transactions (at the end of the table).
+async function retryMissingParts(itemId) {
+  const item = uploadQueue.find(q => q.id === itemId);
+  if (!item || !item.retry) return;
+  const { stmt, batches, totalBatches, otherWarning } = item.retry;
+  const wasFailed = item.status === 'failed';
+  item.status = 'working';
+  renderUploadFileList();
+  const statusEl = document.getElementById('unifiedStatus');
+  const { added, failed, skipped } = await readStatementBatches(stmt, batches, `missing parts of ${item.file.name}`, msg => { statusEl.textContent = msg; });
+  item.addedCount = (wasFailed ? 0 : (item.addedCount || 0)) + added;
+  item.retry = failed.length ? { stmt, batches: failed.map(f => f.lines), totalBatches, otherWarning } : null;
+  const notes = [statementFailedWarning(stmt, failed, totalBatches), otherWarning];
+  if (skipped.length) notes.push(`${skipped.length} more statement line${skipped.length !== 1 ? 's were' : ' was'} not returned by Claude — add by hand.`);
+  if (failed.length === batches.length && !added && wasFailed) {
+    item.status = 'failed';
+    item.error = failed[0].error;
+  } else {
+    item.status = 'done';
+    item.error = null;
+    item.warning = notes.filter(Boolean).join(' ') || null;
+    if (item.hash) importedFileHashes.set(item.hash, { name: item.file.name, addedCount: item.addedCount });
+  }
+  statusEl.textContent = added ? `Added ${added} more row${added !== 1 ? 's' : ''} from ${item.file.name}.` : `Still couldn't read the missing parts of ${item.file.name}.`;
+  renderUploadFileList();
+  if (rows.length) { showTable(); checkHomeRows(); }
+  updateUI();
 }
 
 // Processes every queued file in order, routing by type:
@@ -3222,6 +3272,7 @@ async function processUnifiedQueue() {
           const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, buildStatement(sheet.rows));
           item.addedCount = result.added;
           item.warning = result.warning || null;
+          item.retry = result.retry || null;
           if (result.added) setExportType('bank');
         } else {
           item.addedCount = await parseFile(item.file);
@@ -3238,6 +3289,7 @@ async function processUnifiedQueue() {
         });
         item.addedCount = result.added;
         item.warning = result.warning || null;
+        item.retry = result.retry || null;
         // A statement carries income, which only the Bank Statement CSV can hold.
         if (result.added) setExportType('bank');
       } else {
@@ -3248,6 +3300,7 @@ async function processUnifiedQueue() {
     } catch(e) {
       item.status = 'failed';
       item.error = e.message || String(e);
+      item.retry = e.retry || null;
     }
     done++;
     renderUploadFileList();

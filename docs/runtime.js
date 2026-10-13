@@ -125,35 +125,54 @@
     // valid JSON in exactly that shape (no stray quotes or truncated syntax).
     if (opts.schema) params.output_config = { format: { type: 'json_schema', schema: opts.schema } };
 
+    // Streaming keeps long extractions (big bank statements) clear of HTTP
+    // timeouts; finalMessage() just waits for the complete response.
+    const send = () => SUPPORTS_FALLBACKS.test(model)
+      ? client.beta.messages
+          .stream({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })
+          .finalMessage()
+      : client.messages.stream(params).finalMessage();
+
+    // The SDK retries a request that fails to start, but not one whose
+    // connection drops part-way through a long reply — retry those here,
+    // along with overloaded / rate-limited / server errors, with a pause.
+    const isTransient = e => !(e instanceof Anthropic.APIError)
+      || e instanceof Anthropic.APIConnectionError
+      || e instanceof Anthropic.RateLimitError
+      || e.status === undefined || e.status === 408 || e.status === 409 || e.status >= 500;
+    const RETRY_DELAYS_MS = [3000, 8000, 20000];
+
     let message;
-    try {
-      // Streaming keeps long extractions (big bank statements) clear of HTTP
-      // timeouts; finalMessage() just waits for the complete response.
-      message = SUPPORTS_FALLBACKS.test(model)
-        ? await client.beta.messages
-            .stream({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' })
-            .finalMessage()
-        : await client.messages.stream(params).finalMessage();
-    } catch (error) {
-      if (error instanceof Anthropic.AuthenticationError) {
-        throw codedError('not_configured', 'Your Anthropic API key was rejected — check it in ⚙ Settings.');
+    for (let attempt = 0; ; attempt++) {
+      try {
+        message = await send();
+        break;
+      } catch (error) {
+        if (attempt < RETRY_DELAYS_MS.length && isTransient(error)) {
+          await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+        const detail = String((error && error.message) || error || '').slice(0, 160);
+        if (error instanceof Anthropic.AuthenticationError) {
+          throw codedError('not_configured', 'Your Anthropic API key was rejected — check it in ⚙ Settings.');
+        }
+        if (error instanceof Anthropic.NotFoundError) {
+          throw codedError('not_configured', `Model "${model}" was not found — it may have been retired. Put a current model name in ⚙ Settings.`);
+        }
+        if (error instanceof Anthropic.RateLimitError) {
+          throw codedError('rate_limited', 'Too many requests right now — please wait a moment and try again.');
+        }
+        if (error instanceof Anthropic.APIError && error.status === 413) {
+          throw codedError('prompt_too_large', 'That file is too large for one request.');
+        }
+        if (error instanceof Anthropic.BadRequestError) {
+          throw codedError('bad_request', error.message);
+        }
+        if (error instanceof Anthropic.APIConnectionError || !(error instanceof Anthropic.APIError)) {
+          throw codedError('network', `Could not reach the Claude API after ${attempt + 1} attempts (${detail || 'connection dropped'}).`);
+        }
+        throw codedError('server_error', `Claude API error ${error.status ?? ''}: ${detail}`);
       }
-      if (error instanceof Anthropic.NotFoundError) {
-        throw codedError('not_configured', `Model "${model}" was not found — it may have been retired. Put a current model name in ⚙ Settings.`);
-      }
-      if (error instanceof Anthropic.RateLimitError) {
-        throw codedError('rate_limited', 'Too many requests right now — please wait a moment and try again.');
-      }
-      if (error instanceof Anthropic.APIError && error.status === 413) {
-        throw codedError('prompt_too_large', 'That file is too large for one request.');
-      }
-      if (error instanceof Anthropic.BadRequestError) {
-        throw codedError('bad_request', error.message);
-      }
-      if (error instanceof Anthropic.APIError) {
-        throw codedError('server_error', `Claude API error ${error.status ?? ''}: ${error.message}`);
-      }
-      throw codedError('network', 'Could not reach the Claude API — check your connection.');
     }
 
     if (message.stop_reason === 'refusal') {
