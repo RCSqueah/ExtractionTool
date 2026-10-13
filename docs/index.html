@@ -417,6 +417,7 @@
   .dir-sign.in  { color: var(--green); }
   tbody td input.money-in { color: var(--green); font-weight: 500; }
   .net-amt.money-in { color: var(--green); font-weight: 500; }
+  .personal-split { font-size: 10px; color: var(--text-muted); text-align: right; white-space: nowrap; }
   tbody td input.notes-input { color: var(--amber); font-size: 11.5px; }
 
   .summary-bar {
@@ -3435,6 +3436,7 @@ function buildRowHTML(row) {
     </td>
     <td class="no-strike">
       <div class="net-amt${netAdj?' adjusted':''}${inRow?' money-in':''}\" id="net_${id}">${netStr}</div>
+      <div class="personal-split" id="split_${id}">${personalCaption(row)}</div>
     </td>
     <td class="no-strike">
       <button class="del-row" onclick="removeRow(${id})">×</button>
@@ -3688,6 +3690,29 @@ function calcNet(gross, bu, home, acc, vat) {
   return amt;
 }
 
+// How a row splits on export. When a business-use % (or the home-office
+// toggle) reduces an ordinary row, the business part goes to the row's own
+// account and the rest to 980 Personal Use Adjustments, so the two lines
+// always add up to the original amount. Use of Home rows keep their own rule
+// (a single line) and are never split.
+const PERSONAL_USE_ACCOUNT = '980';
+function exportSplit(gross, bu, home, accFull, vat) {
+  const total = round2(Math.abs(parseFloat(gross) || 0));
+  const business = round2(Math.abs(calcNet(gross, bu, home, accFull, vat)));
+  if (isHome213(accFull) || business >= total) return { business, personal: 0, businessPct: 100 };
+  return { business, personal: round2(total - business), businessPct: total ? Math.round(business / total * 10000) / 100 : 0 };
+}
+
+// "70" for a 30% business row; trims needless decimals ("62.5", not "62.50").
+function personalPctLabel(split) {
+  return String(Math.round((100 - split.businessPct) * 100) / 100);
+}
+
+function personalCaption(row) {
+  const { personal } = exportSplit(row.gross, row.bu, row.home, row.acc, row.vat);
+  return personal > 0 ? `+ £${personal.toFixed(2)} to ${PERSONAL_USE_ACCOUNT} personal` : '';
+}
+
 function updateNet(id) {
   const row = rows.find(r => r.id === id);
   if (!row) return;
@@ -3705,6 +3730,8 @@ function updateNet(id) {
     el.textContent = formatNetAmount(row, net);
     el.className = 'net-amt' + (netAdj?' adjusted':'') + (row.fromBank && row.direction === 'in' ? ' money-in' : '');
   }
+  const splitEl = document.getElementById('split_'+id);
+  if (splitEl) splitEl.textContent = personalCaption(row);
   updateSummary();
 }
 
@@ -4037,25 +4064,19 @@ function buildBillsCSVData() {
       }
     }
 
-    const row = [
-      csvEsc(sup),
-      csvEsc(ref),
-      dateStr,
-      dueStr,
-      csvEsc(descOut),
-      '1',
-      net.toFixed(2),
-      accCode,
-      csvEsc(vat),
-      '',
-    ];
-    lines.push(row.join(','));
+    const split = exportSplit(gross, bu, r.home, accFull, vat);
+    const billLine = (d, amt, code, tax) => [csvEsc(sup), csvEsc(ref), dateStr, dueStr, csvEsc(d), '1', amt.toFixed(2), code, csvEsc(tax), ''].join(',');
+    lines.push(billLine(descOut, split.personal > 0 ? split.business : net, accCode, vat));
+    // Same invoice number, so Xero makes it one bill with two lines.
+    if (split.personal > 0) {
+      lines.push(billLine(`${desc} @ ${personalPctLabel(split)}% personal use`, split.personal, PERSONAL_USE_ACCOUNT, 'No VAT'));
+    }
     seq++;
   });
 
   return {
     content: lines.join('\r\n'),
-    count: seq - 1,
+    count: lines.length - 1,
     fname: `xero_bills_${new Date().toISOString().slice(0,10)}.csv`,
     label: 'Bills import',
   };
@@ -4064,7 +4085,7 @@ function buildBillsCSVData() {
 async function exportBillsCSV() {
   const data = buildBillsCSVData();
   const ok = await triggerDownload(data.content, data.fname);
-  if (ok) setAlert(`✓ Exported ${data.count} row${data.count!==1?'s':''} to ${data.fname} (${data.label})`, 'success');
+  if (ok) setAlert(`✓ Exported ${data.count} line${data.count!==1?'s':''} to ${data.fname} (${data.label}). Rows with a business-use % are split, with the personal part to ${PERSONAL_USE_ACCOUNT} Personal Use Adjustments.`, 'success');
 }
 
 function buildBankCSVData() {
@@ -4120,25 +4141,19 @@ function buildBankCSVData() {
     // rows sourced from a bank-statement CSV, direction:'in') stays positive
     // — Xero's own bank statement import expects that same signed-amount
     // convention.
-    const signedAmount = (r.direction === 'in') ? Math.abs(net) : -Math.abs(net);
-    const amountOut = signedAmount.toFixed(2);
-
-    const row = [
-      dateStr,
-      amountOut,
-      csvEsc(sup),
-      csvEsc(descOut),
-      csvEsc(ref),
-      accCode,
-      csvEsc(vat),
-    ];
-    lines.push(row.join(','));
+    const sign = r.direction === 'in' ? 1 : -1;
+    const split = exportSplit(gross, bu, r.home, accFull, vat);
+    const bankLine = (d, amt, code, tax) => [dateStr, (sign * Math.abs(amt)).toFixed(2), csvEsc(sup), csvEsc(d), csvEsc(ref), code, csvEsc(tax)].join(',');
+    lines.push(bankLine(descOut, split.personal > 0 ? split.business : net, accCode, vat));
+    if (split.personal > 0) {
+      lines.push(bankLine(`${desc} @ ${personalPctLabel(split)}% personal use`, split.personal, PERSONAL_USE_ACCOUNT, 'No VAT'));
+    }
     seq++;
   });
 
   return {
     content: lines.join('\r\n'),
-    count: seq - 1,
+    count: lines.length - 1,
     fname: `xero_bank_statement_${new Date().toISOString().slice(0,10)}.csv`,
     label: 'Bank Statement import — money out shown as negative, money in as positive. Use Xero\'s "Import a Statement" on the relevant bank account, and map the Account Code / Tax Rate columns during import to auto-reconcile.',
   };
@@ -4147,7 +4162,7 @@ function buildBankCSVData() {
 async function exportBankCSV() {
   const data = buildBankCSVData();
   const ok = await triggerDownload(data.content, data.fname);
-  if (ok) setAlert(`✓ Exported ${data.count} row${data.count!==1?'s':''} to ${data.fname} (${data.label})`, 'success');
+  if (ok) setAlert(`✓ Exported ${data.count} line${data.count!==1?'s':''} to ${data.fname} (${data.label}) Rows with a business-use % are split, with the personal part to ${PERSONAL_USE_ACCOUNT} Personal Use Adjustments.`, 'success');
 }
 
 async function triggerDownload(content, fname) {
