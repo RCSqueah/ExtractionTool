@@ -1797,6 +1797,7 @@ function onClientSelectChange() {
     return;
   }
   document.getElementById('newClientRow').style.display = 'none';
+  startNewJobIfClientChanged(sel.value);
   refreshExportBtn();
   loadClientRules();
 }
@@ -1817,8 +1818,84 @@ async function confirmAddNewClient() {
   document.getElementById('clientName').value = existing || name;
   document.getElementById('newClientRow').style.display = 'none';
   input.value = '';
+  startNewJobIfClientChanged(existing || name);
   refreshExportBtn();
   await loadClientRules();
+}
+
+// ── NEW JOB ON CLIENT CHANGE ────────────────────────────────────────────────
+// Switching from one client to another starts a fresh job, so one client's
+// rows can't be exported under another's name. What was cleared is kept so
+// a mistaken switch can be undone from the message. Picking a client when
+// none was selected clears nothing (files may be added before the client).
+let lastJobSnapshot = null;
+
+function startNewJobIfClientChanged(newClient) {
+  const prevClient = currentClientKey;
+  if (!prevClient || prevClient === newClient) return;
+  const email = document.getElementById('emailPasteBox');
+  const hasWork = rows.length || uploadQueue.length || xeroExportQueue.length || (email && email.value.trim());
+  lastJobSnapshot = hasWork ? {
+    client: prevClient,
+    rows: rows.map(r => ({ ...r })),
+    nextId,
+    uploadQueue: uploadQueue.slice(),
+    xeroExportQueue: xeroExportQueue.slice(),
+    hashes: new Map(importedFileHashes),
+    email: email ? email.value : '',
+    exportType,
+  } : null;
+
+  clearAll();
+  xeroExportQueue = [];
+  renderXeroExportFileList();
+  if (email) email.value = '';
+  ['xeroExportStatus', 'unifiedStatus', 'emailStatus', 'processAllStatus'].forEach(idName => {
+    const el = document.getElementById(idName);
+    if (el) el.textContent = '';
+  });
+  const confirmBox = document.getElementById('clearConfirmBox');
+  if (confirmBox) confirmBox.innerHTML = '';
+  sortCol = null; sortDir = 1;
+  document.querySelectorAll('.sort-ind').forEach(el => el.textContent = '');
+  setExportType('bills');
+  refreshProcessAllBtn();
+
+  const el = document.getElementById('mainAlert');
+  el.className = 'alert show alert-info';
+  el.textContent = `New job started for ${newClient}.`;
+  if (lastJobSnapshot) {
+    const n = lastJobSnapshot.rows.length;
+    el.textContent += ` ${prevClient}'s ${n ? `${n} row${n !== 1 ? 's' : ''}` : 'queued files and email'} ${n === 1 ? 'was' : 'were'} cleared. `;
+    const undo = document.createElement('button');
+    undo.type = 'button'; undo.className = 'btn'; undo.style.marginLeft = '6px';
+    undo.textContent = `↶ Undo — back to ${prevClient}`;
+    undo.onclick = undoNewJob;
+    el.appendChild(undo);
+  }
+}
+
+async function undoNewJob() {
+  const snap = lastJobSnapshot;
+  if (!snap) return;
+  lastJobSnapshot = null;
+  document.getElementById('clientName').value = snap.client;
+  await loadClientRules();
+  clearAll();
+  rows = snap.rows;
+  nextId = snap.nextId;
+  rows.forEach(r => renderRow(r));
+  uploadQueue = snap.uploadQueue;
+  renderUploadFileList();
+  xeroExportQueue = snap.xeroExportQueue;
+  renderXeroExportFileList();
+  snap.hashes.forEach((v, k) => importedFileHashes.set(k, v));
+  const email = document.getElementById('emailPasteBox');
+  if (email) email.value = snap.email;
+  setExportType(snap.exportType);
+  if (rows.length) { showTable(); checkHomeRows(); }
+  refreshProcessAllBtn();
+  setAlert(`Back to ${snap.client} — everything restored.`, 'success');
 }
 
 function cancelAddNewClient() {
