@@ -857,7 +857,7 @@
           <th style="min-width:140px" onclick="sortBy('gross')" class="sortable" data-col="gross">Gross £ <span class="sort-ind" id="si-gross"></span></th>
           <th style="width:100px">% BU</th>
           <th style="width:60px">Home</th>
-          <th style="width:100px" class="text-right" onclick="sortBy('net')" class="sortable" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
+          <th style="width:100px" onclick="sortBy('net')" class="sortable text-right" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
           <th style="width:32px"></th>
         </tr>
       </thead>
@@ -2629,27 +2629,80 @@ const BANK_STATEMENT_TEXT_LIMIT = 20000; // also cap by size, for very long line
 const MAX_BANK_STATEMENT_CHUNKS = 40;    // safety cap: ~1,600 transactions per file
 const BANK_STATEMENT_PARALLEL = 3;
 
-// Splits CSV text into batches of at most `maxRows` data lines (and
-// `maxChars`), repeating the header line at the top of every batch so each
-// one makes sense on its own.
-function chunkCsvByRows(text, maxRows, maxChars) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
-  if (!lines.length) return [];
-  const [header, ...body] = lines;
-  const chunks = [];
-  let current = [];
-  let size = header.length;
-  for (const line of body) {
-    if (current.length && (current.length >= maxRows || size + line.length + 1 > maxChars)) {
-      chunks.push([header, ...current].join('\n'));
-      current = [];
-      size = header.length;
-    }
-    current.push(line);
-    size += line.length + 1;
+// Splits CSV text into rows of cells, exactly as written: handles quoted
+// cells (with commas, doubled "" quotes or line breaks inside) and CRLF.
+function parseCsvText(text) {
+  const rows = [];
+  let row = [], cell = '', inQuotes = false;
+  const src = String(text || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"' && src[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') inQuotes = false;
+      else cell += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && src[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
   }
-  if (current.length) chunks.push([header, ...current].join('\n'));
-  return chunks;
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// Reads a bank statement CSV into its own rows, so the original wording
+// can be taken from the file itself rather than from Claude's reply.
+// Returns { header, records, descCol, dateCol }. Banks put a few lines of
+// account details above the column headings, so the header is the first
+// row (within the first 15) that has a "date" column.
+function parseBankStatementCsv(text) {
+  const all = parseCsvText(text)
+    .map(r => r.map(c => c.trim()))
+    .filter(r => r.some(c => c !== ''));
+  if (!all.length) return { header: [], records: [], descCol: -1, dateCol: -1 };
+  let headerIdx = all.slice(0, 15).findIndex(r => r.some(c => /\bdate\b/i.test(c) && c.length < 30));
+  if (headerIdx < 0) headerIdx = 0;
+  const header = all[headerIdx];
+  const records = all.slice(headerIdx + 1);
+  const exact = /^(transaction )?(description|details|narrative|memo|particulars)$/i;
+  const loose = /descr|detail|narrat|memo|particular/i;
+  let descCol = header.findIndex(h => exact.test(h));
+  if (descCol < 0) descCol = header.findIndex(h => loose.test(h));
+  const dateCol = Math.max(0, header.findIndex(h => /\bdate\b/i.test(h)));
+  return { header, records, descCol, dateCol };
+}
+
+// The bank's own wording for a statement line: its Description column,
+// or — if the file has no recognisable one — the whole line.
+function originalBankDescription(stmt, record) {
+  const raw = stmt.descCol >= 0 ? record[stmt.descCol] : record.filter(c => c !== '').join(', ');
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+// Splits the statement into batches of line numbers (1-based, into
+// stmt.records) of at most `maxRows` lines and `maxChars` of text.
+function batchStatementLines(stmt, maxRows, maxChars) {
+  const batches = [];
+  let current = [], size = 0;
+  stmt.records.forEach((rec, i) => {
+    const len = rec.join(',').length + 6;
+    if (current.length && (current.length >= maxRows || size + len > maxChars)) {
+      batches.push(current); current = []; size = 0;
+    }
+    current.push(i + 1); size += len;
+  });
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+// The text sent to Claude for one batch: the column headings, then each
+// line prefixed with its Line number so every reply can be matched back
+// to the exact statement line.
+function statementBatchText(stmt, lineNos) {
+  const row = cells => cells.map(csvEsc).join(',');
+  return [row(['Line', ...stmt.header]), ...lineNos.map(n => row([String(n), ...stmt.records[n - 1]]))].join('\n');
 }
 
 function buildBankStatementExtractionSystemPrompt() {
@@ -2705,6 +2758,7 @@ const BANK_TRANSACTIONS_SCHEMA = {
       items: {
         type: 'object',
         properties: {
+          line: { type: 'integer' },
           date: nullable({ type: 'string' }),
           payee: nullable({ type: 'string' }),
           description: { type: 'string' },
@@ -2716,7 +2770,7 @@ const BANK_TRANSACTIONS_SCHEMA = {
           confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
           issues: { type: 'string' },
         },
-        required: ['date', 'payee', 'description', 'amount', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'confidence', 'issues'],
+        required: ['line', 'date', 'payee', 'description', 'amount', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'confidence', 'issues'],
         additionalProperties: false,
       },
     },
@@ -2728,7 +2782,7 @@ const BANK_TRANSACTIONS_SCHEMA = {
 async function callBankStatementExtraction(text) {
   const { sample } = await getCaps();
   if (!sample) throw new Error('Asking Claude is not available in this view.');
-  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nReturn the transactions as {"transactions": [ ... ]}, one entry per line of the data, in the shape described above.\n\nHere is the bank statement data:\n\n${text}`;
+  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nEach line of the data starts with a "Line" number. Return the transactions as {"transactions": [ ... ]}, exactly one entry per line, in the shape described above, plus "line" — that line's Line number, unchanged.\n\nHere is the bank statement data:\n\n${text}`;
   let parsed;
   try {
     parsed = await sample.json(prompt, { schema: BANK_TRANSACTIONS_SCHEMA, modelTier: 'default', cache: false });
@@ -2745,7 +2799,11 @@ async function callBankStatementExtraction(text) {
 // transaction is included, exactly as on the statement: money in is marked
 // as income, and anything that looks personal is flagged in Notes for the
 // accountant to code — nothing is excluded from export.
-function mapBankRowToInternal(t) {
+// `original` is the bank's own wording for this line, taken from the file
+// (null if Claude's reply couldn't be matched to a line). It becomes the
+// Description that goes to Xero; Claude's plain-English version is kept in
+// Notes for reference only.
+function mapBankRowToInternal(t, original) {
   const direction = t.direction === 'in' ? 'in' : 'out';
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
@@ -2753,8 +2811,10 @@ function mapBankRowToInternal(t) {
   const modelVat = modelVatExplicit || (accFull ? defaultVat(accFull) : '');
   const vat = supplierVatOverride(t.payee) || modelVat;
 
-  const desc = t.description || '';
+  const desc = original || t.description || '';
   const notes = [];
+  if (!original) notes.push("Couldn't match this to a statement line — Description is Claude's wording, check it");
+  else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
   if (t.likelyNonBusiness) notes.push('Possibly personal — consider 980 Personal Use Adjustments');
   if (t.confidence && t.confidence !== 'high') notes.push(`AI ${t.confidence} confidence — verify`);
@@ -2794,24 +2854,25 @@ function mapBankRowToInternal(t) {
 // next to the file. Throws only if nothing could be read at all.
 async function parseBankStatementCsvFile(file, onProgress) {
   const text = await readFileAsPlainText(file);
-  let chunks = chunkCsvByRows(text, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
-  if (!chunks.length) throw new Error('The file is empty.');
+  const stmt = parseBankStatementCsv(text);
+  if (!stmt.records.length) throw new Error('No transactions found in the file.');
+  let batches = batchStatementLines(stmt, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
   let capped = false;
-  if (chunks.length > MAX_BANK_STATEMENT_CHUNKS) {
-    chunks = chunks.slice(0, MAX_BANK_STATEMENT_CHUNKS);
+  if (batches.length > MAX_BANK_STATEMENT_CHUNKS) {
+    batches = batches.slice(0, MAX_BANK_STATEMENT_CHUNKS);
     capped = true;
   }
 
   // Read batches a few at a time, but add rows in statement order.
-  const results = new Array(chunks.length);
+  const results = new Array(batches.length);
   let next = 0, finished = 0;
-  const report = () => onProgress && onProgress(`Reading ${file.name}${chunks.length > 1 ? ` — ${finished} of ${chunks.length} parts done` : ''}…`);
+  const report = () => onProgress && onProgress(`Reading ${file.name}${batches.length > 1 ? ` — ${finished} of ${batches.length} parts done` : ''}…`);
   report();
   async function worker() {
-    while (next < chunks.length) {
+    while (next < batches.length) {
       const i = next++;
       try {
-        results[i] = { rows: await callBankStatementExtraction(chunks[i]) };
+        results[i] = { rows: await callBankStatementExtraction(statementBatchText(stmt, batches[i])) };
       } catch (e) {
         results[i] = { error: e.message || String(e) };
       }
@@ -2819,29 +2880,48 @@ async function parseBankStatementCsvFile(file, onProgress) {
       report();
     }
   }
-  await Promise.all(Array.from({ length: Math.min(BANK_STATEMENT_PARALLEL, chunks.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(BANK_STATEMENT_PARALLEL, batches.length) }, worker));
+
+  const dateOf = n => (stmt.records[n - 1] || [])[stmt.dateCol] || `line ${n}`;
+  const span = nums => {
+    const a = dateOf(nums[0]), b = dateOf(nums[nums.length - 1]);
+    return a === b ? a : `${a} – ${b}`;
+  };
 
   let added = 0;
   const failed = [];
+  const skipped = [];
   results.forEach((r, i) => {
-    if (r.error) { failed.push({ part: i + 1, error: r.error }); return; }
-    r.rows.forEach(t => addRow(mapBankRowToInternal(t)));
-    added += r.rows.length;
+    if (r.error) { failed.push({ lines: batches[i], error: r.error }); return; }
+    const sent = new Set(batches[i]);
+    const seen = new Set();
+    r.rows.forEach(t => {
+      const n = Number(t.line);
+      const matched = sent.has(n) && !seen.has(n);
+      if (matched) seen.add(n);
+      addRow(mapBankRowToInternal(t, matched ? originalBankDescription(stmt, stmt.records[n - 1]) : null));
+      added++;
+    });
+    batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
   });
-  if (failed.length === chunks.length) throw new Error(failed[0].error);
+  if (failed.length === batches.length) throw new Error(failed[0].error);
 
   const warnings = [];
   if (failed.length) {
-    // Name the date span of each missing batch (first column of its first
-    // and last lines) so it can be checked against the statement — re-adding
-    // the whole file would duplicate the rows that did come through.
-    const spans = failed.map(f => {
-      const lines = chunks[f.part - 1].split('\n').slice(1);
-      const first = (lines[0] || '').split(',')[0].trim();
-      const last = (lines[lines.length - 1] || '').split(',')[0].trim();
-      return first === last ? first : `${first} – ${last}`;
-    });
-    warnings.push(`${failed.length} of ${chunks.length} parts couldn't be read (${failed[0].error.replace(/\.$/, '')}). The rest were added. Missing transactions: ${spans.join('; ')} — add those by hand or from a shorter statement for those dates.`);
+    // Name the date span of each missing batch so it can be checked against
+    // the statement — re-adding the whole file would duplicate the rows
+    // that did come through.
+    warnings.push(`${failed.length} of ${batches.length} parts couldn't be read (${failed[0].error.replace(/\.$/, '')}). The rest were added. Missing transactions: ${failed.map(f => span(f.lines)).join('; ')} — add those by hand or from a shorter statement for those dates.`);
+  }
+  // Lines Claude's reply didn't account for (only counted within batches
+  // that were read) — listed so nothing goes missing silently.
+  const unreadSkipped = skipped.filter(n => !failed.some(f => f.lines.includes(n)));
+  if (unreadSkipped.length) {
+    const list = unreadSkipped.slice(0, 8).map(n => `${dateOf(n)} ${originalBankDescription(stmt, stmt.records[n - 1]).slice(0, 40)}`).join('; ');
+    warnings.push(`${unreadSkipped.length} statement line${unreadSkipped.length !== 1 ? 's were' : ' was'} not returned by Claude: ${list}${unreadSkipped.length > 8 ? '; …' : ''} — add ${unreadSkipped.length !== 1 ? 'these' : 'it'} by hand.`);
+  }
+  if (stmt.descCol < 0) {
+    warnings.push("No Description column was found in this file, so each row's Description is the whole statement line.");
   }
   if (capped) {
     warnings.push(`Very large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS * BANK_STATEMENT_ROWS_PER_CHUNK} transactions were read. Split it and add the rest separately.`);
@@ -3560,12 +3640,18 @@ function refreshRefPlaceholders() {
 let sortCol = null;
 let sortDir = 1; // 1 = asc, -1 = desc
 
+// Gross and BU Amt sort by the value as shown: bank rows carry their sign
+// (money out negative, income positive); other rows are plain amounts.
+function shownSign(row) {
+  return row.fromBank && row.direction !== 'in' ? -1 : 1;
+}
+
 function getRowValue(row, col) {
-  if (col === 'gross') return parseFloat(row.gross) || 0;
+  if (col === 'gross') return shownSign(row) * (parseFloat(row.gross) || 0);
   if (col === 'net') {
     const buEl = document.querySelector(`#tr_${row.id} .bu-cell input`);
     const bu = buEl ? buEl.value : row.bu;
-    return calcNet(parseFloat(row.gross)||0, bu, row.home, row.acc, row.vat);
+    return shownSign(row) * calcNet(parseFloat(row.gross)||0, bu, row.home, row.acc, row.vat);
   }
   if (col === 'date') return row.date || '';
   return String(row[col] || '').toLowerCase();
