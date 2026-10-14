@@ -12,6 +12,7 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
 - **Model**: also set in **⚙ Settings**, defaulting to `claude-sonnet-5`. For harder documents, such as messy scans or handwriting, `claude-opus-5` is more capable but costs about 2.5 times as much. If a model is retired, the tool tells you, and you type the new model's name there. No code change is needed.
 - **What it reads**: in step ②, drop in any mix of:
   - the firm's expense template (.xlsx);
+  - the Self Assessment template (.xlsx with Income and Expenses sheets). Every line is read as typed, dates such as `8.04` become 8 April in the sheet's "Year End" tax year, and Claude only chooses the account;
   - bank statements and transaction lists (.csv or .xlsx). These are read line by line, and the Description and amount come from the file;
   - chambers bills and receipts (PDF, PNG, JPG);
   - Outlook emails (.msg) or pasted email text;
