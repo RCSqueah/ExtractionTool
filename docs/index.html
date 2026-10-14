@@ -747,9 +747,9 @@
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
-      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt" multiple>
+      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple>
       <div class="drop-icon" style="font-size:26px;margin-bottom:8px;">📎</div>
-      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, or the client's own notes/accounts (.odt, .docx, .txt)</div>
+      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, the client's own notes/accounts (.odt, .docx, .txt), or a .zip of any of these</div>
     </div>
     <div id="unifiedFileList" style="margin-top:12px;display:flex;flex-direction:column;gap:8px;"></div>
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
@@ -2481,6 +2481,12 @@ async function computeFileHash(file) {
 }
 
 async function addFilesToUploadQueue(files) {
+  try {
+    files = await expandZipFiles(files);
+  } catch (e) {
+    setAlert(`Couldn't open the zip file: ${e.message || e}`, 'warn');
+    files = files.filter(f => !/\.zip$/i.test(f.name));
+  }
   const newItems = files.map(file => ({
     id: uploadQueueIdCounter++, file, status: 'queued', error: null,
     addedCount: null, hash: null, duplicateOf: null
@@ -2525,34 +2531,76 @@ function uploadFileKind(file) {
 // DecompressionStream does the unzipping, so no extra library), then turns
 // paragraphs into lines and tables into "cell | cell | cell" rows so Claude
 // sees the layout.
-async function unzipEntry(buf, wanted) {
+function listZipEntries(buf) {
   const u8 = new Uint8Array(buf);
   const dv = new DataView(buf);
   let eocd = -1;
   for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
     if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd < 0) throw new Error("This doesn't look like a valid .odt/.docx file.");
+  if (eocd < 0) throw new Error("This doesn't look like a valid zip-based file.");
   let p = dv.getUint32(eocd + 16, true);
   const count = dv.getUint16(eocd + 10, true);
+  const entries = [];
   for (let n = 0; n < count; n++) {
     if (dv.getUint32(p, true) !== 0x02014b50) break;
-    const method = dv.getUint16(p + 10, true);
-    const compSize = dv.getUint32(p + 20, true);
     const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
     const localOff = dv.getUint32(p + 42, true);
-    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
-    if (name === wanted) {
-      const dataStart = localOff + 30 + dv.getUint16(localOff + 26, true) + dv.getUint16(localOff + 28, true);
-      const data = u8.subarray(dataStart, dataStart + compSize);
-      if (method === 0) return new TextDecoder().decode(data);
-      if (method !== 8) throw new Error('Unsupported compression in this document.');
-      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return await new Response(stream).text();
-    }
+    entries.push({
+      name: new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen)),
+      method: dv.getUint16(p + 10, true),
+      compSize: dv.getUint32(p + 20, true),
+      dataStart: localOff + 30 + dv.getUint16(localOff + 26, true) + dv.getUint16(localOff + 28, true),
+    });
     p += 46 + nameLen + extraLen + commentLen;
   }
-  throw new Error(`Couldn't find ${wanted} inside the document.`);
+  return entries;
+}
+
+async function readZipEntryBytes(buf, entry) {
+  const data = new Uint8Array(buf).subarray(entry.dataStart, entry.dataStart + entry.compSize);
+  if (entry.method === 0) return data;
+  if (entry.method !== 8) throw new Error('Unsupported compression in this file.');
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function unzipEntry(buf, wanted) {
+  const entry = listZipEntries(buf).find(e => e.name === wanted);
+  if (!entry) throw new Error(`Couldn't find ${wanted} inside the document.`);
+  return new TextDecoder().decode(await readZipEntryBytes(buf, entry));
+}
+
+// A .zip dropped into step ② is opened and its files queued one by one.
+// Mac clutter (__MACOSX, .DS_Store, ._ files) is ignored, and a PDF with the
+// same name as a spreadsheet in the zip is skipped as a copy of it, so a
+// month isn't counted twice.
+const ZIP_MEDIA_TYPES = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', csv: 'text/csv', txt: 'text/plain' };
+async function expandZipFiles(files) {
+  const out = [];
+  const notes = [];
+  for (const file of files) {
+    if (!/\.zip$/i.test(file.name)) { out.push(file); continue; }
+    const buf = await file.arrayBuffer();
+    const entries = listZipEntries(buf).filter(e => {
+      const base = e.name.split('/').pop();
+      return base && !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && !base.startsWith('.')
+        && uploadFileKind({ name: base }) !== 'unknown';
+    });
+    const stem = n => n.split('/').pop().replace(/\.[^.]+$/, '').trim().toLowerCase();
+    const sheetStems = new Set(entries.filter(e => /\.(xlsx|xls|csv)$/i.test(e.name)).map(e => stem(e.name)));
+    let added = 0, skippedPdf = 0;
+    for (const e of entries) {
+      if (/\.pdf$/i.test(e.name) && sheetStems.has(stem(e.name))) { skippedPdf++; continue; }
+      const base = e.name.split('/').pop().trim();
+      const ext = base.split('.').pop().toLowerCase();
+      out.push(new File([await readZipEntryBytes(buf, e)], base, { type: ZIP_MEDIA_TYPES[ext] || '' }));
+      added++;
+    }
+    notes.push(`Opened ${file.name}: ${added} file${added !== 1 ? 's' : ''} added${skippedPdf ? `, ${skippedPdf} PDF${skippedPdf !== 1 ? 's' : ''} skipped as copies of the spreadsheets with the same name` : ''}.`);
+  }
+  if (notes.length) setAlert(notes.join(' '), 'info');
+  return out;
 }
 
 async function readDocumentText(file) {
@@ -2923,7 +2971,7 @@ function buildStatement(allRows) {
   const all = allRows
     .map(r => r.map(c => String(c ?? '').trim()))
     .filter(r => r.some(c => c !== ''));
-  const empty = { header: [], records: [], descCol: -1, dateCol: -1, amountCol: -1, inCol: -1, outCol: -1 };
+  const empty = { header: [], records: [], descCol: -1, descCols: [], dateCol: -1, amountCol: -1, amountIsCost: false, buCols: [], inCol: -1, outCol: -1 };
   if (!all.length) return empty;
   let headerIdx = all.slice(0, 15).findIndex(r => r.some(c => /\bdate\b/i.test(c) && c.length < 30));
   if (headerIdx < 0) headerIdx = 0;
@@ -2931,19 +2979,38 @@ function buildStatement(allRows) {
   const exact = /^(transaction )?(description|details|narrative|memo|particulars)$/i;
   const loose = /descr|detail|narrat|memo|particular/i;
   let descCol = baseHeader.findIndex(h => exact.test(h));
-  if (descCol < 0) descCol = baseHeader.findIndex(h => loose.test(h));
+  // No proper Description column (e.g. an expense app's "Type / Detail /
+  // Note" columns): join those describing columns, in sheet order.
+  let descCols = [];
+  if (descCol < 0) {
+    descCols = baseHeader.map((h, i) => /^(type|category|item|detail|details|note|notes|memo|comment|comments|what)$/i.test(h.trim()) || loose.test(h) ? i : -1).filter(i => i >= 0);
+    descCol = descCols.length ? descCols[0] : -1;
+    if (descCols.length < 2) descCols = [];
+  }
   const dateCol = Math.max(0, baseHeader.findIndex(h => /\bdate\b/i.test(h)));
-  const amountCol = baseHeader.findIndex(h => /^(amount|value|transaction amount|amount \(gbp\)|amount gbp)$/i.test(h));
+  let amountCol = baseHeader.findIndex(h => /^(amount|value|transaction amount|amount \(gbp\)|amount gbp)$/i.test(h));
+  // An expense list's amount column ("Cost", "Cost/bill", "Price", "Spend"):
+  // positive figures there are money out, not money in.
+  const costCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /^(cost|cost\s*\/\s*bill|bill|price|spend|expense|amount spent)$/i.test(h));
+  if (costCol >= 0) amountCol = costCol;
+  // The client's business-use share for each line ("% Claim", "Business
+  // use %"); a sheet can have more than one such column — the first with a
+  // value on a row is used.
+  const buCols = baseHeader.map((h, i) => /%\s*claim|claim\s*%|business\s*use|bus(iness)?\s*%|%\s*business/i.test(h) ? i : -1).filter(i => i >= 0);
   const outCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid out|money out|debit|withdrawal/i.test(h));
   const inCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid in|money in|credit|deposit/i.test(h));
 
   const records = [];
   let section = '', anySection = false;
+  const amountCols = [amountCol, outCol, inCol].filter(i => i >= 0);
   for (const r of all.slice(headerIdx + 1)) {
     const filled = r.filter(c => c !== '');
     if (filled.length === 1 && r[0] !== '' && isNaN(parseAmount(r[0])) && !/\d{1,2}[\/\-.]\d{1,2}/.test(r[0])) {
       section = r[0]; anySection = true; continue;
     }
+    // A note line with neither a date nor an amount (e.g. "No expenses 1st
+    // to 5th April") isn't a transaction.
+    if (amountCols.length && !String(r[dateCol] || '').trim() && amountCols.every(i => isNaN(parseAmount(r[i])))) continue;
     records.push({ cells: r, section });
   }
   const header = anySection ? ['Section', ...baseHeader] : baseHeader;
@@ -2952,8 +3019,11 @@ function buildStatement(allRows) {
     header,
     records: records.map(x => anySection ? [x.section, ...x.cells] : x.cells),
     descCol: descCol < 0 ? -1 : descCol + shift,
+    descCols: descCols.map(i => i + shift),
     dateCol: dateCol + shift,
     amountCol: amountCol < 0 ? -1 : amountCol + shift,
+    amountIsCost: costCol >= 0,
+    buCols: buCols.map(i => i + shift),
     inCol: inCol < 0 ? -1 : inCol + shift,
     outCol: outCol < 0 ? -1 : outCol + shift,
   };
@@ -2961,6 +3031,22 @@ function buildStatement(allRows) {
 
 function parseBankStatementCsv(text) {
   return buildStatement(parseCsvText(text));
+}
+
+// The client's business-use share for a line, from a "% Claim"-type column:
+// { pct } (0.4 → 40, "50%" → 50, 1 → 100), { tbc: true } for "TBC" / "?",
+// or null if the sheet has no such column or the cell is empty.
+function statementBusinessUse(stmt, record) {
+  for (const col of stmt.buCols || []) {
+    const raw = String(record[col] ?? '').trim();
+    if (!raw) continue;
+    if (/^(tbc|tba|\?+|unknown)$/i.test(raw)) return { tbc: true, raw };
+    const n = parseFloat(raw.replace('%', ''));
+    if (isNaN(n)) return { tbc: true, raw };
+    const pct = raw.includes('%') || n > 1 ? n : n * 100;
+    return { pct: Math.round(pct * 100) / 100 };
+  }
+  return null;
 }
 
 // The section heading a statement line sits under ('' if none).
@@ -2987,7 +3073,16 @@ function parseAmount(v) {
 function statementAmount(stmt, record) {
   if (stmt.amountCol >= 0) {
     const a = parseAmount(record[stmt.amountCol]);
-    if (!isNaN(a)) return { amount: Math.abs(a), direction: a < 0 ? 'out' : 'in' };
+    if (!isNaN(a)) {
+      // Expense lists: a cost is money out, a negative one a refund.
+      if (stmt.amountIsCost) return { amount: Math.abs(a), direction: a < 0 ? 'in' : 'out' };
+      return { amount: Math.abs(a), direction: a < 0 ? 'out' : 'in' };
+    }
+    // The file has an amount column but this line's cell is empty: leave
+    // the amount blank for the accountant rather than use Claude's guess.
+    if (!String(record[stmt.amountCol] ?? '').trim()) {
+      return { amount: null, missing: true, direction: stmt.amountIsCost ? 'out' : null };
+    }
   }
   if (stmt.inCol >= 0 || stmt.outCol >= 0) {
     const o = stmt.outCol >= 0 ? parseAmount(record[stmt.outCol]) : NaN;
@@ -3064,7 +3159,7 @@ function looksLikeStatementSheet(rows, sheetNames) {
     const cells = r.map(c => String(c || '').trim().replace(/^\*/, '').toLowerCase());
     if (cells[0]?.startsWith('post') && (cells[1] || '').includes('account')) return false;
     const hasDate = cells.some(c => /\bdate\b/.test(c) && c.length < 30);
-    const hasAmount = cells.some(c => /^(amount|value|paid in|paid out|money in|money out|debit|credit)\b/.test(c));
+    const hasAmount = cells.some(c => /^(amount|value|paid in|paid out|money in|money out|debit|credit)\b/.test(c) || /^(cost|cost\s*\/\s*bill|bill|price|spend|expense|amount spent)$/.test(c));
     if (hasDate && hasAmount) return true;
   }
   return false;
@@ -3073,7 +3168,9 @@ function looksLikeStatementSheet(rows, sheetNames) {
 // The bank's own wording for a statement line: its Description column,
 // or — if the file has no recognisable one — the whole line.
 function originalBankDescription(stmt, record) {
-  const raw = stmt.descCol >= 0 ? record[stmt.descCol] : record.filter(c => c !== '').join(', ');
+  const raw = (stmt.descCols && stmt.descCols.length)
+    ? stmt.descCols.map(i => String(record[i] || '').trim()).filter(Boolean).join(' — ')
+    : stmt.descCol >= 0 ? record[stmt.descCol] : record.filter(c => c !== '').join(', ');
   return String(raw || '').replace(/\s+/g, ' ').trim();
 }
 
@@ -3163,10 +3260,10 @@ const BANK_TRANSACTIONS_SCHEMA = {
   additionalProperties: false,
 };
 
-async function callBankStatementExtraction(text) {
+async function callBankStatementExtraction(text, fileLabel) {
   const { sample } = await getCaps();
   if (!sample) throw new Error('Asking Claude is not available in this view.');
-  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nEach line of the data starts with a "Line" number. Return the transactions as {"transactions": [ ... ]}, exactly one entry per line, in the shape described above, plus "line" — that line's Line number, unchanged.\n\nHere is the bank statement data:\n\n${text}`;
+  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\n${fileLabel ? `The file is "${fileLabel}". If a line's date has an obvious year typo that doesn't fit the period in the file name (e.g. 2023-12-31 in a "Dec 2024" file), give the corrected date and say so in "issues". ` : ''}Each line of the data starts with a "Line" number. Return the transactions as {"transactions": [ ... ]}, exactly one entry per line, in the shape described above, plus "line" — that line's Line number, unchanged.\n\nHere is the bank statement data:\n\n${text}`;
   let parsed;
   try {
     parsed = await sample.json(prompt, { schema: BANK_TRANSACTIONS_SCHEMA, modelTier: 'default', cache: false });
@@ -3190,7 +3287,8 @@ async function callBankStatementExtraction(text) {
 function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   // Amount and money in/out come from the file when its columns say so;
   // Claude's reading is only used when they don't.
-  const direction = fromFile ? fromFile.direction : (t.direction === 'in' ? 'in' : 'out');
+  const claudeDirection = t.direction === 'in' ? 'in' : 'out';
+  const direction = fromFile && fromFile.direction ? fromFile.direction : claudeDirection;
   const amount = fromFile ? fromFile.amount : t.amount;
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
@@ -3201,6 +3299,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const desc = original || t.description || '';
   const notes = [];
   if (section) notes.push(section);
+  if (fromFile && fromFile.missing) notes.push("No amount on the client's sheet — enter it");
   if (!original) notes.push(opts.unmatchedNote || "Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
@@ -3212,9 +3311,21 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   // with a 30% business figure next to it) — never on Use of Home rows.
   let bu = '';
   const pct = Number(t.businessUsePercent);
-  if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
+  const fileBu = opts.fileBu;
+  if (fileBu && fileBu.tbc) {
+    notes.push(`Business use is "${fileBu.raw}" on the client's sheet — decide the % before exporting`);
+  } else if (fileBu && fileBu.pct !== undefined) {
+    // The client's own % from the file; 100% needs no adjustment.
+    if (fileBu.pct > 0 && fileBu.pct < 100 && !isHome213(accFull)) bu = fileBu.pct;
+    else if (fileBu.pct === 0) notes.push("Client's sheet claims 0% business use — check");
+  } else if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
     bu = Math.round(pct * 100) / 100;
     notes.push(`AI set business use to ${bu}% — verify`);
+  }
+  // A date Claude changed (e.g. a year typo in the client's sheet) is shown,
+  // so the correction is visible rather than silent.
+  if (opts.fileDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.fileDate) && t.date && t.date !== opts.fileDate) {
+    notes.push(`Date corrected from ${opts.fileDate} — check`);
   }
   // Car costs are usually partly private: flag one that came through at
   // 100% so it isn't exported in full by mistake.
@@ -3373,7 +3484,7 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
     while (next < batches.length) {
       const i = next++;
       try {
-        results[i] = { rows: await callBankStatementExtraction(statementBatchText(stmt, batches[i])) };
+        results[i] = { rows: await callBankStatementExtraction(statementBatchText(stmt, batches[i]), label) };
       } catch (e) {
         results[i] = { error: e.message || String(e) };
       }
@@ -3395,7 +3506,10 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
       const matched = sent.has(n) && !seen.has(n);
       if (matched) seen.add(n);
       const rec = matched ? stmt.records[n - 1] : null;
-      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : ''));
+      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : '', {
+        fileBu: rec ? statementBusinessUse(stmt, rec) : null,
+        fileDate: rec ? String(rec[stmt.dateCol] || '') : '',
+      }));
       added++;
     });
     batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
