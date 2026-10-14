@@ -747,9 +747,9 @@
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
-      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv" multiple>
+      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt" multiple>
       <div class="drop-icon" style="font-size:26px;margin-bottom:8px;">📎</div>
-      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, or bank statement CSVs</div>
+      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, or the client's own notes/accounts (.odt, .docx, .txt)</div>
     </div>
     <div id="unifiedFileList" style="margin-top:12px;display:flex;flex-direction:column;gap:8px;"></div>
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
@@ -1228,14 +1228,17 @@ function isBookkeepingEntry(supplier) {
   return BOOKKEEPING_ENTRY.test(String(supplier || ''));
 }
 
-function recordClientRule(supplier, desc, acc, vat) {
+// `note` (optional) is a short reminder of how it was coded, e.g. "Car fuel
+// @ 30% business use" from the Xero history — shown to Claude with the rule.
+function recordClientRule(supplier, desc, acc, vat, note) {
   if (!currentClientKey || !acc || !vat) return;
   if (isBookkeepingEntry(supplier)) return;
   const key = ruleKeyFor(supplier, desc);
   if (!key) return;
   const existing = currentClientRules[key];
-  if (existing && existing.acc === acc && existing.vat === vat) return; // no change
-  currentClientRules[key] = { acc, vat };
+  const keepNote = note || (existing && existing.note) || '';
+  if (existing && existing.acc === acc && existing.vat === vat && (existing.note || '') === keepNote) return; // no change
+  currentClientRules[key] = keepNote ? { acc, vat, note: keepNote } : { acc, vat };
   scheduleSaveClientDoc();
 }
 
@@ -1522,7 +1525,9 @@ function buildXeroFileExtractionSystemPrompt() {
 
 Include money received as well as money spent: a customer or income source that's regularly coded to a revenue account (e.g. "Window Cleaning Clients" → Revenue) is a pattern worth reporting too.
 
-Leave out of "items" anything that isn't an ordinary day-to-day transaction: rows whose Source is "Manual Journal" (year-end adjustments, balancing figures, VAT return adjustments, capital allowance journals), and rows whose contact is a bookkeeping entry rather than a real supplier or customer — clearing or suspense accounts, transfers between the client's own accounts, opening/conversion balances, rounding. Their accounts can still go in "accounts".
+Leave out of "items" anything that is a bookkeeping adjustment rather than a real cost or income: balancing figures, clearing or suspense accounts, VAT return and flat rate adjustments, capital allowance / WDA journals, disallowance or personal-proportion adjustments, opening/conversion balances, rounding, transfers between the client's own accounts. Their accounts can still go in "accounts".
+
+Manual journals: some clients' books are kept only as year-end journals that post each kind of cost or income to its account (e.g. "Expenses - Mobile Phone" to Telephone and Internet, "Use of home - Rent" to Use of Home, "Revenue - April" to Revenue). When there are no ordinary transactions for that kind of cost, report each such category journal as an item, with "supplier" set to "" and "description" set to the kind of cost (e.g. "Mobile phone"). Otherwise skip manual journals.
 
 Where the same supplier is split between accounts by percentage (e.g. "Car Fuel @ 30% business use" to Motor Expenses and "@ 70% personal use" to Personal Use Adjustments), report the business-use account as the pattern and mention the split in "description".
 
@@ -1681,7 +1686,7 @@ async function processXeroExportQueue() {
         items.forEach(it => {
           const vat = VAT_RATES.includes(it.vatRate) ? it.vatRate : null;
           if (it.accountCode && it.accountName && vat) {
-            recordClientRule(it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat);
+            recordClientRule(it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat, String(it.description || '').slice(0, 80));
             if (!newVatDefaults[it.accountCode]) newVatDefaults[it.accountCode] = vat;
             recorded++;
           }
@@ -2510,7 +2515,91 @@ function uploadFileKind(file) {
   if (ext === 'pdf') return 'pdf';
   if (['png','jpg','jpeg'].includes(ext)) return 'image';
   if (ext === 'csv') return 'bankcsv';
+  if (['odt', 'docx', 'txt'].includes(ext)) return 'doc';
   return 'unknown';
+}
+
+// ── TEXT DOCUMENTS (.odt / .docx / .txt) ────────────────────────────────────
+// Word and LibreOffice documents are zip files holding XML. This reads the
+// one XML part needed straight from the zip (the browser's built-in
+// DecompressionStream does the unzipping, so no extra library), then turns
+// paragraphs into lines and tables into "cell | cell | cell" rows so Claude
+// sees the layout.
+async function unzipEntry(buf, wanted) {
+  const u8 = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("This doesn't look like a valid .odt/.docx file.");
+  let p = dv.getUint32(eocd + 16, true);
+  const count = dv.getUint16(eocd + 10, true);
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    const localOff = dv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+    if (name === wanted) {
+      const dataStart = localOff + 30 + dv.getUint16(localOff + 26, true) + dv.getUint16(localOff + 28, true);
+      const data = u8.subarray(dataStart, dataStart + compSize);
+      if (method === 0) return new TextDecoder().decode(data);
+      if (method !== 8) throw new Error('Unsupported compression in this document.');
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return await new Response(stream).text();
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  throw new Error(`Couldn't find ${wanted} inside the document.`);
+}
+
+async function readDocumentText(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'txt') return await readFileAsPlainText(file);
+  const buf = await file.arrayBuffer();
+  const xml = await unzipEntry(buf, ext === 'docx' ? 'word/document.xml' : 'content.xml');
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const lines = [];
+  const textOf = el => {
+    // ODT: <text:s/> is a space, <text:tab/> a tab; DOCX text lives in <w:t>.
+    let out = '';
+    el.childNodes.forEach(n => {
+      if (n.nodeType === 3) out += n.nodeValue;
+      else if (n.nodeType === 1) {
+        if (n.localName === 's') out += ' '.repeat(Number(n.getAttribute('text:c')) || 1);
+        else if (n.localName === 'tab') out += '\t';
+        else if (n.localName === 'br' || n.localName === 'line-break') out += ' ';
+        else out += textOf(n);
+      }
+    });
+    return out;
+  };
+  const walk = el => {
+    el.childNodes.forEach(n => {
+      if (n.nodeType !== 1) return;
+      const tag = n.localName;
+      if (tag === 'table' || tag === 'tbl') {
+        lines.push('[table]');
+        [...n.getElementsByTagNameNS('*', tag === 'tbl' ? 'tr' : 'table-row')].forEach(tr => {
+          const cells = [...tr.childNodes].filter(c => c.nodeType === 1 && (c.localName === 'table-cell' || c.localName === 'tc'))
+            .map(c => textOf(c).replace(/\s+/g, ' ').trim());
+          while (cells.length && !cells[cells.length - 1]) cells.pop();
+          if (cells.some(Boolean)) lines.push(cells.join(' | '));
+        });
+        lines.push('[/table]');
+      } else if (tag === 'p' || tag === 'h') {
+        const t = textOf(n).replace(/[ \t]+/g, ' ').trim();
+        if (t) lines.push(t);
+      } else {
+        walk(n);
+      }
+    });
+  };
+  const body = doc.getElementsByTagNameNS('*', ext === 'docx' ? 'body' : 'text')[0] || doc.documentElement;
+  walk(body);
+  return lines.join('\n');
 }
 
 function includeAnyway(id) {
@@ -2591,10 +2680,25 @@ function buildChartOfAccountsText() {
   if (!codable.length) {
     return '(No chart of accounts has been set up for this client yet — leave "accountCode" null for every line item; the user will code accounts manually.)';
   }
-  return codable.map(a => {
+  const coa = codable.map(a => {
     const vat = VAT_DEFAULTS[a.code] || 'No VAT';
     return `${a.code} - ${a.name} (default VAT: ${vat})`;
   }).join('\n');
+  return coa + buildCodingHistoryText();
+}
+
+// This client's remembered coding (from the Xero history and past jobs), so
+// Claude follows how their suppliers and expense types have actually been
+// coded rather than guessing from account names alone.
+function buildCodingHistoryText() {
+  const keys = Object.keys(currentClientRules || {}).sort().slice(0, 150);
+  if (!keys.length) return '';
+  const lines = keys.map(k => {
+    const r = currentClientRules[k];
+    const what = k.startsWith('supplier:') ? `Supplier "${k.slice(9)}"` : `"${k.slice(5)}"`;
+    return `- ${what} → ${r.acc} (${r.vat})${r.note ? ` — ${r.note}` : ''}`;
+  });
+  return `\n\nTHIS CLIENT'S USUAL CODING (from their past bookkeeping — follow it for the same supplier or kind of cost):\n${lines.join('\n')}`;
 }
 
 function buildChambersExtractionSystemPrompt() {
@@ -3054,7 +3158,7 @@ async function callBankStatementExtraction(text) {
 // (null if Claude's reply couldn't be matched to a line). It becomes the
 // Description that goes to Xero; Claude's plain-English version is kept in
 // Notes for reference only.
-function mapBankRowToInternal(t, original, fromFile, section) {
+function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   // Amount and money in/out come from the file when its columns say so;
   // Claude's reading is only used when they don't.
   const direction = fromFile ? fromFile.direction : (t.direction === 'in' ? 'in' : 'out');
@@ -3068,7 +3172,7 @@ function mapBankRowToInternal(t, original, fromFile, section) {
   const desc = original || t.description || '';
   const notes = [];
   if (section) notes.push(section);
-  if (!original) notes.push("Couldn't match this to a statement line — Description is Claude's wording, check it");
+  if (!original) notes.push(opts.unmatchedNote || "Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
   if (t.likelyNonBusiness) notes.push('Possibly personal — consider 980 Personal Use Adjustments');
@@ -3121,6 +3225,112 @@ function mapBankRowToInternal(t, original, fromFile, section) {
 // Returns { added, warning } — `warning` is set when some batches couldn't
 // be read, so the rows that did come through are kept and the gap is shown
 // next to the file. Throws only if nothing could be read at all.
+// ── FREE-FORM CLIENT DOCUMENTS (.odt / .docx / .txt) ────────────────────────
+// A client's own notes or year summary — e.g. a table of monthly takings with
+// costs typed into the cells ("Fuel k2 additive £6.99 x2", "Public
+// liability £6x12") and household bills listed underneath. Claude turns it
+// into one transaction per item. The Description is the item's own text from
+// the document ("sourceText"), checked against the document so nothing Claude
+// rewrites reaches Xero; any sum Claude worked out is shown in Notes.
+function buildDocumentExtractionSystemPrompt(fallbackDate) {
+  return `You are reading a self-employed client's own record of their income and expenses (their notes or a year summary, typed by the client) for a UK accountant to import into Xero. It is free-form: often a table with a row per month showing takings, with costs typed into cells (sometimes with the amount before or after the words, sometimes as a sum like "£6 x12" or "£6.99 x2"), plus lines of text listing household or annual costs.
+
+Return one entry per real item of income or cost — nothing missed, nothing counted twice:
+- Monthly income/takings: one entry per month, money in.
+- Each cost mentioned: one entry, money out. Where a cell holds several costs, return each separately.
+- Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
+
+For each entry:
+- "date" — YYYY-MM-DD. If the document covers a UK tax year (e.g. "25/26" = 6 April 2025 to 5 April 2026), date a monthly figure at the end of that month within the tax year (April → 2025-04-30, … March → 2026-03-31). Date an annual or undated figure at ${fallbackDate ? fallbackDate : 'the end of the period the document covers'}.
+- "sourceText" — the exact words and figure from the document for this item, copied character for character as typed (e.g. "Fuel k2 additive £6.99 x2", "Council tax 12x£160 = £1920", "April | £1,225" for a table row — for a table row, give the row label and the cell). This is checked against the document, so do not correct or reword it.
+- "description" — a short, clean plain-English description (e.g. "Fuel additive", "Council tax", "Takings — April 2025").
+- "payee" — the supplier or customer if named, else null.
+- "amount" — the amount as a positive number. If you had to work it out (a sum like "£6 x12" = 72, "£6.99 x2" = 13.98), give the result, and show the working in "calculation" (e.g. "£6 × 12 = £72"); otherwise "calculation" is "". Correct an obvious typo only if certain (e.g. "£1.620" in a list of whole-pound monthly takings is £1,620) and say so in "issues".
+- "direction" — "in" for income/takings, "out" for costs.
+- "accountCode" — best-fit code from the chart below, using this client's usual coding where it applies; household bills (rent, council tax, gas/electricity, water) go to a Use of Home account if there is one. Null if unsure.
+- "vatRate" — one of: ${VAT_RATES.join(', ')} — following the account's default and this client's usual coding; null if unsure.
+- "likelyNonBusiness" — true for things that aren't a business expense or income at all, e.g. a loan or car-finance repayment (only any interest may be claimable), personal spending, transfers.
+- "businessUsePercent" — a percentage (e.g. 70) only if the document or the client instructions say only part is business use; else null.
+- "confidence" — "high", "medium" or "low".
+- "issues" — a short note if anything is unclear, assumed or worth checking; else "".
+
+CHART OF ACCOUNTS:
+${buildChartOfAccountsText()}${extraInstructionsBlock()}`;
+}
+
+const DOCUMENT_TRANSACTIONS_SCHEMA = {
+  type: 'object',
+  properties: {
+    transactions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          date: nullable({ type: 'string' }),
+          sourceText: { type: 'string' },
+          description: { type: 'string' },
+          payee: nullable({ type: 'string' }),
+          amount: { type: 'number' },
+          calculation: { type: 'string' },
+          direction: { type: 'string', enum: ['out', 'in'] },
+          accountCode: nullable({ type: 'string' }),
+          vatRate: nullable({ type: 'string', enum: VAT_RATES }),
+          likelyNonBusiness: { type: 'boolean' },
+          businessUsePercent: nullable({ type: 'number' }),
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+          issues: { type: 'string' },
+        },
+        required: ['date', 'sourceText', 'description', 'payee', 'amount', 'calculation', 'direction', 'accountCode', 'vatRate', 'likelyNonBusiness', 'businessUsePercent', 'confidence', 'issues'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['transactions'],
+  additionalProperties: false,
+};
+
+// Loose match for checking Claude's quoted text against the document:
+// ignores case, spacing, and the " | " table-cell separators.
+function normaliseForMatch(t) {
+  return String(t || '').toLowerCase().replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function parseDocumentFile(file, onProgress) {
+  const text = await readDocumentText(file);
+  if (!text.trim()) throw new Error('The document is empty.');
+  if (onProgress) onProgress(`Reading ${file.name}…`);
+  const { sample } = await getCaps();
+  if (!sample) throw new Error('Asking Claude is not available in this view.');
+  const fallbackDate = document.getElementById('customQuarterDate')?.value || '';
+  const prompt = `${buildDocumentExtractionSystemPrompt(fallbackDate)}\n\nHere is the document "${file.name}":\n\n${text}`;
+  let parsed;
+  try {
+    parsed = await sample.json(prompt, { schema: DOCUMENT_TRANSACTIONS_SCHEMA, modelTier: 'default', cache: false });
+  } catch (e) {
+    if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
+    throw new Error(sampleErrorMessage(e));
+  }
+  const items = Array.isArray(parsed) ? parsed : (parsed && parsed.transactions);
+  if (!Array.isArray(items)) throw new Error('Model response was not in the expected shape');
+
+  const haystack = normaliseForMatch(text);
+  let unverified = 0;
+  items.forEach(t => {
+    const quoted = String(t.sourceText || '').replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
+    const verified = quoted && haystack.includes(normaliseForMatch(quoted)) ? quoted : null;
+    if (!verified) unverified++;
+    const row = mapBankRowToInternal(t, verified, null, '', {
+      unmatchedNote: "Couldn't find this wording in the document — Description is Claude's, check it",
+    });
+    if (t.calculation) row.notes = joinNotes([row.notes, `Calculated: ${t.calculation}`]);
+    addRow(row);
+  });
+  const warning = unverified
+    ? `${unverified} item${unverified !== 1 ? 's' : ''} couldn't be matched word for word to the document — their Description is Claude's wording (see Notes).`
+    : '';
+  return { added: items.length, warning };
+}
+
 // Reads the given batches of statement lines with Claude, a couple at a
 // time, and adds their rows in statement order. Returns what was added,
 // which batches failed (with why), and lines Claude's replies left out.
@@ -3283,6 +3493,11 @@ async function processUnifiedQueue() {
         const aiRows = await callChambersExtraction(item.file, kind);
         aiRows.forEach(r => addRow(mapChambersRowToInternal(r)));
         item.addedCount = aiRows.length;
+      } else if (kind === 'doc') {
+        const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; });
+        item.addedCount = result.added;
+        item.warning = result.warning || null;
+        if (result.added) setExportType('bank');
       } else if (kind === 'bankcsv') {
         const result = await parseBankStatementCsvFile(item.file, (msg) => {
           statusEl.textContent = msg;
@@ -3293,7 +3508,7 @@ async function processUnifiedQueue() {
         // A statement carries income, which only the Bank Statement CSV can hold.
         if (result.added) setExportType('bank');
       } else {
-        throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, or .csv');
+        throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, .csv, .odt, .docx or .txt');
       }
       item.status = 'done';
       if (item.hash) importedFileHashes.set(item.hash, { name: item.file.name, addedCount: item.addedCount });
