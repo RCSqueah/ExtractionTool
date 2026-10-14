@@ -18,7 +18,7 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
   - Outlook emails (.msg) or pasted email text;
   - a client's own notes or year summaries (.odt, .docx, .txt, or a spreadsheet list). Claude reads these, and each Description is the client's own wording, checked against the document.
 
-  Step ① takes last year's Xero Account Transactions export; one **Process everything** press reads both.
+  Step ① takes last year's Xero Account Transactions export; one **Process everything** press reads both. It also picks out last year's business-use adjustments (e.g. "Motor expenses 60% business use", "Use of Home 1 of 4 rooms") and shows them under the client for reference.
 - **Client data**: client lists, charts of accounts, coding history and notes are saved in your browser. Use **⚙ Settings → Back up client data** now and then, because clearing browser data deletes them. **Restore from backup** brings them back, or moves them to another computer or browser.
 
 | File | What it does |
