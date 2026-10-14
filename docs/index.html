@@ -670,13 +670,19 @@
     </div>
     <div class="field">
       <label>Period end</label>
-      <input type="text" id="quarter" placeholder="e.g. September, or YE-31 March" oninput="refreshExportBtn()">
+      <select id="quarter" onchange="onPeriodChange()">
+        <option>YE-5 April</option>
+        <option>January</option><option>February</option><option>March</option><option>April</option>
+        <option>May</option><option>June</option><option>July</option><option>August</option>
+        <option>September</option><option>October</option><option>November</option><option>December</option>
+      </select>
     </div>
     <div class="field">
       <label>Year</label>
-      <input type="number" id="yearInput" placeholder="e.g. 2025" min="2000" max="2099" oninput="refreshExportBtn()">
+      <input type="number" id="yearInput" placeholder="e.g. 2025" min="2000" max="2099" oninput="onPeriodChange()">
     </div>
   </div>
+  <div id="adjustmentsLine" style="display:none;margin:-6px 0 16px;padding:8px 12px;border-left:3px solid var(--amber);background:rgba(128,128,128,0.08);font-size:12.5px;line-height:1.7;"></div>
   <div class="field" id="customQuarterDateRow" style="margin:-10px 0 16px;max-width:220px;">
     <label>Actual period-end date</label>
     <input type="date" id="customQuarterDate" oninput="refreshExportBtn()">
@@ -1032,6 +1038,7 @@ async function loadClientRules() {
   VAT_DEFAULTS = {};
   currentExtraInstructions = '';
   currentFlatRate = false;
+  currentAdjustments = [];
 
   if (name) {
     const { db } = await getCaps();
@@ -1048,6 +1055,7 @@ async function loadClientRules() {
           if (data.coa && data.coa.vatDefaults && typeof data.coa.vatDefaults === 'object') VAT_DEFAULTS = data.coa.vatDefaults;
           if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
           currentFlatRate = data.flatRate === true;
+          if (Array.isArray(data.adjustments)) currentAdjustments = data.adjustments;
         }
       } catch (e) {
         // No history yet for this client — that's fine, starts empty.
@@ -1066,6 +1074,7 @@ async function loadClientRules() {
   if (fr) { fr.checked = currentFlatRate; fr.disabled = !currentClientKey; }
   renderClientHistoryPanel();
   renderCoaPanel();
+  renderAdjustments();
   refreshAllRows();
 }
 
@@ -1085,10 +1094,25 @@ async function saveClientDoc() {
       coa: { accounts: ACCOUNTS, vatDefaults: VAT_DEFAULTS },
       notes: currentExtraInstructions,
       flatRate: currentFlatRate,
+      adjustments: currentAdjustments,
     });
   } catch (e) {
     console.error('Could not save client data:', e);
   }
+}
+
+// Last year's business-use / personal-use adjustments, read from the Xero
+// export in Step 1 (e.g. "Motor expenses adjustment 60% business use") —
+// shown under the client for reference; nothing is applied automatically.
+let currentAdjustments = [];
+function renderAdjustments() {
+  const el = document.getElementById('adjustmentsLine');
+  if (!el) return;
+  if (!currentClientKey || !currentAdjustments.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const money = a => (a === null || a === undefined || isNaN(Number(a))) ? '' : ` (${Number(a) < 0 ? '−' : ''}£${Math.abs(Number(a)).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+  el.innerHTML = `<strong>Last year's business-use adjustments</strong> (from the Xero export — for reference, nothing is applied):` + currentAdjustments.map(a =>
+    `<div>• ${esc(a.account)} — ${esc(a.description)}${money(a.amount)}</div>`).join('');
+  el.style.display = 'block';
 }
 
 let clientDocSaveTimer = null;
@@ -1529,6 +1553,8 @@ Leave out of "items" anything that is a bookkeeping adjustment rather than a rea
 
 Manual journals: some clients' books are kept only as year-end journals that post each kind of cost or income to its account (e.g. "Expenses - Mobile Phone" to Telephone and Internet, "Use of home - Rent" to Use of Home, "Revenue - April" to Revenue). When there are no ordinary transactions for that kind of cost, report each such category journal as an item, with "supplier" set to "" and "description" set to the kind of cost (e.g. "Mobile phone"). Otherwise skip manual journals.
 
+Separately, list in "adjustments" every business-use or personal-use adjustment in the data: journals that take out a private proportion or keep only the business share (e.g. "Motor expenses adjustment 60% business use", "Telephone & Internet adjustment - Less personal usage 42.86%", "Use of Home adjustments - 1 of 3 rooms"), and costs split by percentage to a personal-use / drawings account (e.g. "Car fuel @ 70% personal use" to Personal Use Adjustments). For each, give "account" — the name of the cost account it adjusts (e.g. "Motor Expenses"), "description" — the journal's or line's own wording exactly as in the data, and "amount" — its amount (negative for a reduction), or null. One entry per adjustment; an empty list if there are none. Don't list VAT, flat rate, capital allowance or opening balance journals here.
+
 Where one contact is used for many different kinds of cost or income (e.g. the client's own name or initials, or a "Cash Clearing Account"), make each item's "description" say what the cost actually is (e.g. "Michael's work", "Train fare", "Car mileage", "Rent"), without the contact name.
 
 Where the same supplier is split between accounts by percentage (e.g. "Car Fuel @ 30% business use" to Motor Expenses and "@ 70% personal use" to Personal Use Adjustments), report the business-use account as the pattern and mention the split in "description".
@@ -1539,6 +1565,7 @@ OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fence
 
 {
   "accounts": [ { "code": "<exact account code as it appears>", "name": "<exact account name as it appears>" } ],
+  "adjustments": [ { "account": "<cost account adjusted>", "description": "<wording as in the data>", "amount": <number or null> } ],
   "items": [
     {
       "supplier": "<payee/contact name>",
@@ -1567,8 +1594,11 @@ const XERO_EXPORT_SCHEMA = (() => {
         supplier: { type: 'string' }, description: { type: 'string' }, accountCode: { type: 'string' }, accountName: { type: 'string' },
         vatRate: nul({ type: 'string', enum: VAT_RATES }), date: nul({ type: 'string' }), amount: nul({ type: 'number' }),
       }, required: ['supplier', 'description', 'accountCode', 'accountName', 'vatRate', 'date', 'amount'], additionalProperties: false } },
+      adjustments: { type: 'array', items: { type: 'object', properties: {
+        account: { type: 'string' }, description: { type: 'string' }, amount: nul({ type: 'number' }),
+      }, required: ['account', 'description', 'amount'], additionalProperties: false } },
     },
-    required: ['accounts', 'items'],
+    required: ['accounts', 'items', 'adjustments'],
     additionalProperties: false,
   };
 })();
@@ -1591,6 +1621,7 @@ async function callXeroFileExtraction(fileText) {
   if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.items)) {
     throw new Error('Model response was not in the expected shape');
   }
+  if (!Array.isArray(parsed.adjustments)) parsed.adjustments = [];
   return parsed;
 }
 
@@ -1658,6 +1689,8 @@ async function processXeroExportQueue() {
   btn.disabled = true;
   const toProcess = xeroExportQueue.filter(q => q.status === 'queued');
   let totalAccounts = 0, totalRules = 0;
+  const adjustments = [];
+  let anyRead = false;
 
   for (const item of toProcess) {
     item.status = 'working';
@@ -1687,7 +1720,15 @@ async function processXeroExportQueue() {
       const supplierAccounts = {};
       for (let i = 0; i < chunks.length; i++) {
         statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
-        const { accounts, items } = await callXeroFileExtraction(chunks[i]);
+        const { accounts, items, adjustments: adj } = await callXeroFileExtraction(chunks[i]);
+        adj.forEach(a => {
+          const description = String(a.description || '').trim();
+          if (!description) return;
+          const account = String(a.account || '').trim();
+          if (!adjustments.some(x => x.account.toLowerCase() === account.toLowerCase() && x.description.toLowerCase() === description.toLowerCase())) {
+            adjustments.push({ account, description, amount: typeof a.amount === 'number' ? a.amount : null });
+          }
+        });
         const newVatDefaults = {};
         const supplierOf = it => String(it.supplier || '').trim().toLowerCase();
         items.forEach(it => {
@@ -1707,6 +1748,7 @@ async function processXeroExportQueue() {
         mergeIntoCoa(accounts, newVatDefaults);
       }
       totalRules += recorded;
+      anyRead = true;
       item.status = 'done';
       item.error = cappedNote ? cappedNote.replace(/^ — /, '') : null;
     } catch (e) {
@@ -1715,6 +1757,9 @@ async function processXeroExportQueue() {
     }
     renderXeroExportFileList();
   }
+
+  // This run's Xero file(s) replace the adjustments shown for the client.
+  if (anyRead) { currentAdjustments = adjustments; renderAdjustments(); }
 
   // Chart-of-accounts/rule saves above are debounced (scheduleSaveClientDoc);
   // make sure the final state is actually persisted before telling the user
@@ -2331,6 +2376,22 @@ function stripHtml(html) {
 }
 
 
+
+// Period end (a month, or YE-5 April) + Year → the actual period-end date
+// below, which stays editable for an unusual date.
+const PERIOD_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function onPeriodChange() {
+  const period = document.getElementById('quarter').value;
+  const year = Number(document.getElementById('yearInput').value);
+  if (year >= 2000 && year <= 2099) {
+    const m = PERIOD_MONTHS.indexOf(period);
+    const iso = m >= 0
+      ? `${year}-${String(m + 1).padStart(2, '0')}-${String(new Date(year, m + 1, 0).getDate()).padStart(2, '0')}`
+      : `${year}-04-05`;
+    document.getElementById('customQuarterDate').value = iso;
+  }
+  refreshExportBtn();
+}
 
 function getQuarterEndDate() {
   const year = document.getElementById('yearInput').value || new Date().getFullYear();
@@ -5013,15 +5074,14 @@ function csvEsc(val) {
 calcHome();
 loadClientList();
 
-// Set current year as default
-document.getElementById('yearInput').value = new Date().getFullYear();
-
-// Set period end to current quarter as a default (still editable free text)
-const qLabelMap = {0:'March',1:'March',2:'March',3:'June',4:'June',5:'June',6:'September',7:'September',8:'September',9:'December',10:'December',11:'December'};
-const qDateMap = {0:'-03-31',1:'-03-31',2:'-03-31',3:'-06-30',4:'-06-30',5:'-06-30',6:'-09-30',7:'-09-30',8:'-09-30',9:'-12-31',10:'-12-31',11:'-12-31'};
-const _m = new Date().getMonth();
-document.getElementById('quarter').value = qLabelMap[_m];
-document.getElementById('customQuarterDate').value = document.getElementById('yearInput').value + qDateMap[_m];
+// Default period: the most recent tax year end (YE-5 April) that has passed.
+(() => {
+  const now = new Date();
+  const afterYe = now.getMonth() > 3 || (now.getMonth() === 3 && now.getDate() >= 6);
+  document.getElementById('yearInput').value = afterYe ? now.getFullYear() : now.getFullYear() - 1;
+  document.getElementById('quarter').value = 'YE-5 April';
+  onPeriodChange();
+})();
 
 refreshExportBtn();
 refreshProcessAllBtn();

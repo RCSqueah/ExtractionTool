@@ -298,10 +298,33 @@
     }
     const entries = Object.entries(backup.docs);
     // Restoring replaces records with the same name; anything not in the
-    // backup is left alone.
-    if (!confirm(`Restore ${entries.length} record(s) from ${backup.savedAt || 'this backup'}? Records with the same name will be replaced.`)) return;
+    // backup is left alone. A starter pack ("merge": true) only adds: clients
+    // join the existing list, and a client already set up keeps its own
+    // coding, notes and settings, gaining only what it doesn't have yet.
+    const merge = backup.merge === true;
+    const question = merge
+      ? `Add ${entries.length} record(s) from "${backup.title || 'this starter pack'}"? Clients you've already set up keep their own coding — only missing accounts and coding rules are added.`
+      : `Restore ${entries.length} record(s) from ${backup.savedAt || 'this backup'}? Records with the same name will be replaced.`;
+    if (!confirm(question)) return;
+    const readDoc = path => { try { return JSON.parse(lsGet(DB_PREFIX + path) || 'null'); } catch (_) { return null; } };
+    const mergeDoc = (path, incoming) => {
+      const old = readDoc(path);
+      if (!old || typeof old !== 'object') return incoming;
+      if (Array.isArray(incoming.clients)) {
+        const list = Array.isArray(old.clients) ? old.clients.slice() : [];
+        incoming.clients.forEach(n => { if (!list.some(c => String(c).toLowerCase() === String(n).toLowerCase())) list.push(n); });
+        return { ...old, clients: list };
+      }
+      const out = { ...incoming, ...old };
+      out.rules = { ...(incoming.rules || {}), ...(old.rules || {}) };
+      const oldAcc = (old.coa && old.coa.accounts) || [];
+      const newAcc = ((incoming.coa && incoming.coa.accounts) || []).filter(a => !oldAcc.some(o => o.code === a.code));
+      out.coa = { accounts: [...oldAcc, ...newAcc], vatDefaults: { ...((incoming.coa && incoming.coa.vatDefaults) || {}), ...((old.coa && old.coa.vatDefaults) || {}) } };
+      if (!Array.isArray(old.adjustments) || !old.adjustments.length) out.adjustments = incoming.adjustments || [];
+      return out;
+    };
     for (const [path, obj] of entries) {
-      if (!lsSet(DB_PREFIX + path, JSON.stringify(obj))) {
+      if (!lsSet(DB_PREFIX + path, JSON.stringify(merge ? mergeDoc(path, obj) : obj))) {
         setStatus('Could not restore — this browser is blocking storage or it is full.');
         return;
       }
