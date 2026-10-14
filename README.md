@@ -10,6 +10,14 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
 
 - **AI**: the page sends documents straight from your browser to Claude, using **your own Anthropic API key**. You enter the key once in **⚙ Settings**, and it's stored only in that browser.
 - **Model**: also set in **⚙ Settings**, defaulting to `claude-sonnet-5`. For harder documents, such as messy scans or handwriting, `claude-opus-5` is more capable but costs about 2.5 times as much. If a model is retired, the tool tells you, and you type the new model's name there. No code change is needed.
+- **What it reads**: in step ②, drop in any mix of:
+  - the firm's expense template (.xlsx);
+  - bank statements and transaction lists (.csv or .xlsx). These are read line by line, and the Description and amount come from the file;
+  - chambers bills and receipts (PDF, PNG, JPG);
+  - Outlook emails (.msg) or pasted email text;
+  - a client's own notes or year summaries (.odt, .docx, .txt, or a spreadsheet list). Claude reads these, and each Description is the client's own wording, checked against the document.
+
+  Step ① takes last year's Xero Account Transactions export; one **Process everything** press reads both.
 - **Client data**: client lists, charts of accounts, coding history and notes are saved in your browser. Use **⚙ Settings → Back up client data** now and then, because clearing browser data deletes them. **Restore from backup** brings them back, or moves them to another computer or browser.
 
 | File | What it does |
