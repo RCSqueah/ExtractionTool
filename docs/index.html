@@ -3002,8 +3002,13 @@ function statementAmount(stmt, record) {
 // cells turned into YYYY-MM-DD (from the date parts, so no time-zone shift).
 async function readSheetRows(file) {
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellNF: true });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+  const sheets = wb.SheetNames.map(name => ({ name, rows: sheetToRows(wb.Sheets[name]) }));
+  return { rows: sheets[0] ? sheets[0].rows : [], sheets, sheetNames: wb.SheetNames };
+}
+
+function sheetToRows(ws) {
+  if (!ws || !ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
   const rows = [];
   for (let R = range.s.r; R <= range.e.r; R++) {
     const row = [];
@@ -3022,7 +3027,31 @@ async function readSheetRows(file) {
     }
     rows.push(row);
   }
-  return { rows, sheetNames: wb.SheetNames };
+  return rows;
+}
+
+// True for the firm's own expense template (sheet "Expenses" / "MTD
+// Template", or a header row starting "Post" then "…account…").
+function looksLikeFirmTemplate(rows, sheetNames) {
+  if (sheetNames.includes('Expenses') || sheetNames.includes('MTD Template')) return true;
+  return rows.slice(0, 25).some(r => {
+    const a = String(r[0] || '').trim().toLowerCase();
+    const b = String(r[1] || '').trim().toLowerCase();
+    return a.startsWith('post') && b.includes('account');
+  });
+}
+
+// A spreadsheet that's neither as plain text for the free-form reader:
+// each row as "cell | cell | cell", each sheet under its name.
+function sheetsAsText(sheets) {
+  return sheets.map(sh => {
+    const lines = sh.rows.map(r => {
+      const cells = r.map(c => String(c || '').trim());
+      while (cells.length && !cells[cells.length - 1]) cells.pop();
+      return cells.join(' | ');
+    }).filter(l => l.replace(/[|\s]/g, ''));
+    return lines.length ? `[sheet: ${sh.name}]\n${lines.join('\n')}` : '';
+  }).filter(Boolean).join('\n\n');
 }
 
 // True when a spreadsheet is a transaction list (Date + Amount-type
@@ -3241,7 +3270,7 @@ Return one entry per real item of income or cost — nothing missed, nothing cou
 - Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
 
 For each entry:
-- "date" — YYYY-MM-DD. If the document covers a UK tax year (e.g. "25/26" = 6 April 2025 to 5 April 2026), date a monthly figure at the end of that month within the tax year (April → 2025-04-30, … March → 2026-03-31). Date an annual or undated figure at ${fallbackDate ? fallbackDate : 'the end of the period the document covers'}.
+- "date" — YYYY-MM-DD. If the document covers a UK tax year (e.g. "25/26" = 6 April 2025 to 5 April 2026), date a monthly figure at the end of that month within the tax year (April → 2025-04-30, … March → 2026-03-31). Date an annual or undated figure at the end of the period the document itself covers (e.g. "2024/2025" or "25/26" as a UK tax year → 5 April 2025 / 5 April 2026)${fallbackDate ? `; only if the document doesn't say which period it covers, use ${fallbackDate}` : ''}.
 - "sourceText" — the exact words and figure from the document for this item, copied character for character as typed (e.g. "Fuel k2 additive £6.99 x2", "Council tax 12x£160 = £1920", "April | £1,225" for a table row — for a table row, give the row label and the cell). This is checked against the document, so do not correct or reword it.
 - "description" — a short, clean plain-English description (e.g. "Fuel additive", "Council tax", "Takings — April 2025").
 - "payee" — the supplier or customer if named, else null.
@@ -3249,7 +3278,8 @@ For each entry:
 - "direction" — "in" for income/takings, "out" for costs.
 - "accountCode" — best-fit code from the chart below, using this client's usual coding where it applies; household bills (rent, council tax, gas/electricity, water) go to a Use of Home account if there is one. Null if unsure.
 - "vatRate" — one of: ${VAT_RATES.join(', ')} — following the account's default and this client's usual coding; null if unsure.
-- "likelyNonBusiness" — true for things that aren't a business expense or income at all, e.g. a loan or car-finance repayment (only any interest may be claimable), personal spending, transfers.
+- "likelyNonBusiness" — true for things that aren't a business expense or income at all, e.g. a loan or car-finance repayment (only any interest may be claimable), personal pension contributions (relieved on the tax return, not in the accounts), personal spending, transfers.
+- Where a figure isn't definite (e.g. "£216 plus increase"), use the figure given and say what's uncertain in "issues". A heading with items listed under it (e.g. "Clothes" then "Work trousers", "Puffer jacket") is context for those items, not an entry itself; ignore stray fragments that aren't an item.
 - "businessUsePercent" — a percentage (e.g. 70) only if the document or the client instructions say only part is business use; else null.
 - "confidence" — "high", "medium" or "low".
 - "issues" — a short note if anything is unclear, assumed or worth checking; else "".
@@ -3295,8 +3325,8 @@ function normaliseForMatch(t) {
   return String(t || '').toLowerCase().replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-async function parseDocumentFile(file, onProgress) {
-  const text = await readDocumentText(file);
+async function parseDocumentFile(file, onProgress, preparedText) {
+  const text = preparedText ?? await readDocumentText(file);
   if (!text.trim()) throw new Error('The document is empty.');
   if (onProgress) onProgress(`Reading ${file.name}…`);
   const { sample } = await getCaps();
@@ -3484,8 +3514,15 @@ async function processUnifiedQueue() {
           item.warning = result.warning || null;
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
-        } else {
+        } else if (looksLikeFirmTemplate(sheet.rows, sheet.sheetNames)) {
           item.addedCount = await parseFile(item.file);
+        } else {
+          // Anything else (e.g. a client's own year summary laid out as a
+          // list) goes through the free-form reader, like an .odt/.docx.
+          const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; }, sheetsAsText(sheet.sheets));
+          item.addedCount = result.added;
+          item.warning = result.warning || null;
+          if (result.added) setExportType('bank');
         }
       } else if (kind === 'msg') {
         item.addedCount = await parseMsgFile(item.file);
