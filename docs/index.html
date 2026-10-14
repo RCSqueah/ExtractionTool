@@ -643,6 +643,33 @@
     <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
       Client lists, charts of accounts and coding history are saved in this browser only. Clearing browser data deletes them, so back up now and then, and restore the backup to use another computer or browser.
     </div>
+    <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:16px;">
+      <div class="field" style="margin:0;">
+        <label>Password for the shared copy</label>
+        <input type="password" id="sharedPw1" autocomplete="new-password" placeholder="e.g. four random words">
+      </div>
+      <div class="field" style="margin:0;">
+        <label>Same password again</label>
+        <input type="password" id="sharedPw2" autocomplete="new-password">
+      </div>
+      <button class="btn" type="button" onclick="createEncryptedCopy()">🔒 Create encrypted copy</button>
+    </div>
+    <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+      Scrambles this browser's client data with the password into <strong>client-data.enc.json</strong>. Upload that file to the <strong>docs</strong> folder on GitHub, and any browser that opens the site asks for the password once and loads the data. Use a long password (four or five random words). It is never stored, and if it's forgotten the shared copy can't be opened.
+    </div>
+  </div>
+</div>
+
+<!-- Unlock the password-protected shared client data — see runtime.js -->
+<div id="unlockBanner" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);">
+  <div style="max-width:1400px;margin:0 auto;padding:16px 24px;display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+    <div class="field" style="margin:0;min-width:260px;">
+      <label>🔒 Password to load your client data</label>
+      <input type="password" id="unlockPassword" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary" type="button" id="unlockBtn">Unlock</button>
+    <button class="btn" type="button" id="unlockLaterBtn">Not now</button>
+    <span id="unlockStatus" style="font-size:12px;color:var(--text-muted);"></span>
   </div>
 </div>
 
@@ -670,13 +697,19 @@
     </div>
     <div class="field">
       <label>Period end</label>
-      <input type="text" id="quarter" placeholder="e.g. September, or YE-31 March" oninput="refreshExportBtn()">
+      <select id="quarter" onchange="onPeriodChange()">
+        <option>YE-5 April</option>
+        <option>January</option><option>February</option><option>March</option><option>April</option>
+        <option>May</option><option>June</option><option>July</option><option>August</option>
+        <option>September</option><option>October</option><option>November</option><option>December</option>
+      </select>
     </div>
     <div class="field">
       <label>Year</label>
-      <input type="number" id="yearInput" placeholder="e.g. 2025" min="2000" max="2099" oninput="refreshExportBtn()">
+      <input type="number" id="yearInput" placeholder="e.g. 2025" min="2000" max="2099" oninput="onPeriodChange()">
     </div>
   </div>
+  <div id="adjustmentsLine" style="display:none;margin:-6px 0 16px;padding:8px 12px;border-left:3px solid var(--amber);background:rgba(128,128,128,0.08);font-size:12.5px;line-height:1.7;"></div>
   <div class="field" id="customQuarterDateRow" style="margin:-10px 0 16px;max-width:220px;">
     <label>Actual period-end date</label>
     <input type="date" id="customQuarterDate" oninput="refreshExportBtn()">
@@ -747,9 +780,9 @@
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
-      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt" multiple>
+      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple>
       <div class="drop-icon" style="font-size:26px;margin-bottom:8px;">📎</div>
-      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, or the client's own notes/accounts (.odt, .docx, .txt)</div>
+      <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, the client's own notes/accounts (.odt, .docx, .txt), or a .zip of any of these</div>
     </div>
     <div id="unifiedFileList" style="margin-top:12px;display:flex;flex-direction:column;gap:8px;"></div>
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
@@ -1032,6 +1065,7 @@ async function loadClientRules() {
   VAT_DEFAULTS = {};
   currentExtraInstructions = '';
   currentFlatRate = false;
+  currentAdjustments = [];
 
   if (name) {
     const { db } = await getCaps();
@@ -1048,6 +1082,7 @@ async function loadClientRules() {
           if (data.coa && data.coa.vatDefaults && typeof data.coa.vatDefaults === 'object') VAT_DEFAULTS = data.coa.vatDefaults;
           if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
           currentFlatRate = data.flatRate === true;
+          if (Array.isArray(data.adjustments)) currentAdjustments = data.adjustments;
         }
       } catch (e) {
         // No history yet for this client — that's fine, starts empty.
@@ -1066,6 +1101,7 @@ async function loadClientRules() {
   if (fr) { fr.checked = currentFlatRate; fr.disabled = !currentClientKey; }
   renderClientHistoryPanel();
   renderCoaPanel();
+  renderAdjustments();
   refreshAllRows();
 }
 
@@ -1085,10 +1121,25 @@ async function saveClientDoc() {
       coa: { accounts: ACCOUNTS, vatDefaults: VAT_DEFAULTS },
       notes: currentExtraInstructions,
       flatRate: currentFlatRate,
+      adjustments: currentAdjustments,
     });
   } catch (e) {
     console.error('Could not save client data:', e);
   }
+}
+
+// Last year's business-use / personal-use adjustments, read from the Xero
+// export in Step 1 (e.g. "Motor expenses adjustment 60% business use") —
+// shown under the client for reference; nothing is applied automatically.
+let currentAdjustments = [];
+function renderAdjustments() {
+  const el = document.getElementById('adjustmentsLine');
+  if (!el) return;
+  if (!currentClientKey || !currentAdjustments.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const money = a => (a === null || a === undefined || isNaN(Number(a))) ? '' : ` (${Number(a) < 0 ? '−' : ''}£${Math.abs(Number(a)).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+  el.innerHTML = `<strong>Last year's business-use adjustments</strong> (from the Xero export — for reference, nothing is applied):` + currentAdjustments.map(a =>
+    `<div>• ${esc(a.account)} — ${esc(a.description)}${money(a.amount)}</div>`).join('');
+  el.style.display = 'block';
 }
 
 let clientDocSaveTimer = null;
@@ -1529,6 +1580,10 @@ Leave out of "items" anything that is a bookkeeping adjustment rather than a rea
 
 Manual journals: some clients' books are kept only as year-end journals that post each kind of cost or income to its account (e.g. "Expenses - Mobile Phone" to Telephone and Internet, "Use of home - Rent" to Use of Home, "Revenue - April" to Revenue). When there are no ordinary transactions for that kind of cost, report each such category journal as an item, with "supplier" set to "" and "description" set to the kind of cost (e.g. "Mobile phone"). Otherwise skip manual journals.
 
+Separately, list in "adjustments" every business-use or personal-use adjustment in the data: journals that take out a private proportion or keep only the business share (e.g. "Motor expenses adjustment 60% business use", "Telephone & Internet adjustment - Less personal usage 42.86%", "Use of Home adjustments - 1 of 3 rooms"), and costs split by percentage to a personal-use / drawings account (e.g. "Car fuel @ 70% personal use" to Personal Use Adjustments). For each, give "account" — the name of the cost account it adjusts (e.g. "Motor Expenses"), "description" — the journal's or line's own wording exactly as in the data, and "amount" — its amount (negative for a reduction), or null. One entry per adjustment; an empty list if there are none. Don't list VAT, flat rate, capital allowance or opening balance journals here.
+
+Where one contact is used for many different kinds of cost or income (e.g. the client's own name or initials, or a "Cash Clearing Account"), make each item's "description" say what the cost actually is (e.g. "Michael's work", "Train fare", "Car mileage", "Rent"), without the contact name.
+
 Where the same supplier is split between accounts by percentage (e.g. "Car Fuel @ 30% business use" to Motor Expenses and "@ 70% personal use" to Personal Use Adjustments), report the business-use account as the pattern and mention the split in "description".
 
 For the tax rate of each combination, use the tax rate name exactly as Xero shows it if it's one of these: ${VAT_RATES.join(', ')}. Otherwise map it to the closest one of those only if you're confident, else leave vatRate null.
@@ -1537,6 +1592,7 @@ OUTPUT — respond with ONLY a JSON object. No markdown, no prose, no code fence
 
 {
   "accounts": [ { "code": "<exact account code as it appears>", "name": "<exact account name as it appears>" } ],
+  "adjustments": [ { "account": "<cost account adjusted>", "description": "<wording as in the data>", "amount": <number or null> } ],
   "items": [
     {
       "supplier": "<payee/contact name>",
@@ -1565,8 +1621,11 @@ const XERO_EXPORT_SCHEMA = (() => {
         supplier: { type: 'string' }, description: { type: 'string' }, accountCode: { type: 'string' }, accountName: { type: 'string' },
         vatRate: nul({ type: 'string', enum: VAT_RATES }), date: nul({ type: 'string' }), amount: nul({ type: 'number' }),
       }, required: ['supplier', 'description', 'accountCode', 'accountName', 'vatRate', 'date', 'amount'], additionalProperties: false } },
+      adjustments: { type: 'array', items: { type: 'object', properties: {
+        account: { type: 'string' }, description: { type: 'string' }, amount: nul({ type: 'number' }),
+      }, required: ['account', 'description', 'amount'], additionalProperties: false } },
     },
-    required: ['accounts', 'items'],
+    required: ['accounts', 'items', 'adjustments'],
     additionalProperties: false,
   };
 })();
@@ -1589,6 +1648,7 @@ async function callXeroFileExtraction(fileText) {
   if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.items)) {
     throw new Error('Model response was not in the expected shape');
   }
+  if (!Array.isArray(parsed.adjustments)) parsed.adjustments = [];
   return parsed;
 }
 
@@ -1656,6 +1716,8 @@ async function processXeroExportQueue() {
   btn.disabled = true;
   const toProcess = xeroExportQueue.filter(q => q.status === 'queued');
   let totalAccounts = 0, totalRules = 0;
+  const adjustments = [];
+  let anyRead = false;
 
   for (const item of toProcess) {
     item.status = 'working';
@@ -1679,14 +1741,33 @@ async function processXeroExportQueue() {
       }
 
       let recorded = 0;
+      // Contacts used for many kinds of cost (the client's own initials, a
+      // cash clearing account) → those rules are kept by description, so
+      // "MT - Michael's work" and "MT - water" don't overwrite each other.
+      const supplierAccounts = {};
       for (let i = 0; i < chunks.length; i++) {
         statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
-        const { accounts, items } = await callXeroFileExtraction(chunks[i]);
+        const { accounts, items, adjustments: adj } = await callXeroFileExtraction(chunks[i]);
+        adj.forEach(a => {
+          const description = String(a.description || '').trim();
+          if (!description) return;
+          const account = String(a.account || '').trim();
+          if (!adjustments.some(x => x.account.toLowerCase() === account.toLowerCase() && x.description.toLowerCase() === description.toLowerCase())) {
+            adjustments.push({ account, description, amount: typeof a.amount === 'number' ? a.amount : null });
+          }
+        });
         const newVatDefaults = {};
+        const supplierOf = it => String(it.supplier || '').trim().toLowerCase();
+        items.forEach(it => {
+          if (supplierOf(it) && it.accountCode) (supplierAccounts[supplierOf(it)] ||= new Set()).add(String(it.accountCode));
+        });
         items.forEach(it => {
           const vat = VAT_RATES.includes(it.vatRate) ? it.vatRate : null;
           if (it.accountCode && it.accountName && vat) {
-            recordClientRule(it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat, String(it.description || '').slice(0, 80));
+            const s = supplierOf(it);
+            const mixed = s && supplierAccounts[s].size > 1;
+            if (mixed) delete currentClientRules['supplier:' + s];
+            recordClientRule(mixed || isBookkeepingEntry(it.supplier) ? '' : it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat, String(it.description || '').slice(0, 80));
             if (!newVatDefaults[it.accountCode]) newVatDefaults[it.accountCode] = vat;
             recorded++;
           }
@@ -1694,6 +1775,7 @@ async function processXeroExportQueue() {
         mergeIntoCoa(accounts, newVatDefaults);
       }
       totalRules += recorded;
+      anyRead = true;
       item.status = 'done';
       item.error = cappedNote ? cappedNote.replace(/^ — /, '') : null;
     } catch (e) {
@@ -1702,6 +1784,9 @@ async function processXeroExportQueue() {
     }
     renderXeroExportFileList();
   }
+
+  // This run's Xero file(s) replace the adjustments shown for the client.
+  if (anyRead) { currentAdjustments = adjustments; renderAdjustments(); }
 
   // Chart-of-accounts/rule saves above are debounced (scheduleSaveClientDoc);
   // make sure the final state is actually persisted before telling the user
@@ -2319,6 +2404,22 @@ function stripHtml(html) {
 
 
 
+// Period end (a month, or YE-5 April) + Year → the actual period-end date
+// below, which stays editable for an unusual date.
+const PERIOD_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function onPeriodChange() {
+  const period = document.getElementById('quarter').value;
+  const year = Number(document.getElementById('yearInput').value);
+  if (year >= 2000 && year <= 2099) {
+    const m = PERIOD_MONTHS.indexOf(period);
+    const iso = m >= 0
+      ? `${year}-${String(m + 1).padStart(2, '0')}-${String(new Date(year, m + 1, 0).getDate()).padStart(2, '0')}`
+      : `${year}-04-05`;
+    document.getElementById('customQuarterDate').value = iso;
+  }
+  refreshExportBtn();
+}
+
 function getQuarterEndDate() {
   const year = document.getElementById('yearInput').value || new Date().getFullYear();
   const customDate = document.getElementById('customQuarterDate').value;
@@ -2481,6 +2582,12 @@ async function computeFileHash(file) {
 }
 
 async function addFilesToUploadQueue(files) {
+  try {
+    files = await expandZipFiles(files);
+  } catch (e) {
+    setAlert(`Couldn't open the zip file: ${e.message || e}`, 'warn');
+    files = files.filter(f => !/\.zip$/i.test(f.name));
+  }
   const newItems = files.map(file => ({
     id: uploadQueueIdCounter++, file, status: 'queued', error: null,
     addedCount: null, hash: null, duplicateOf: null
@@ -2525,34 +2632,76 @@ function uploadFileKind(file) {
 // DecompressionStream does the unzipping, so no extra library), then turns
 // paragraphs into lines and tables into "cell | cell | cell" rows so Claude
 // sees the layout.
-async function unzipEntry(buf, wanted) {
+function listZipEntries(buf) {
   const u8 = new Uint8Array(buf);
   const dv = new DataView(buf);
   let eocd = -1;
   for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
     if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd < 0) throw new Error("This doesn't look like a valid .odt/.docx file.");
+  if (eocd < 0) throw new Error("This doesn't look like a valid zip-based file.");
   let p = dv.getUint32(eocd + 16, true);
   const count = dv.getUint16(eocd + 10, true);
+  const entries = [];
   for (let n = 0; n < count; n++) {
     if (dv.getUint32(p, true) !== 0x02014b50) break;
-    const method = dv.getUint16(p + 10, true);
-    const compSize = dv.getUint32(p + 20, true);
     const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
     const localOff = dv.getUint32(p + 42, true);
-    const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
-    if (name === wanted) {
-      const dataStart = localOff + 30 + dv.getUint16(localOff + 26, true) + dv.getUint16(localOff + 28, true);
-      const data = u8.subarray(dataStart, dataStart + compSize);
-      if (method === 0) return new TextDecoder().decode(data);
-      if (method !== 8) throw new Error('Unsupported compression in this document.');
-      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return await new Response(stream).text();
-    }
+    entries.push({
+      name: new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen)),
+      method: dv.getUint16(p + 10, true),
+      compSize: dv.getUint32(p + 20, true),
+      dataStart: localOff + 30 + dv.getUint16(localOff + 26, true) + dv.getUint16(localOff + 28, true),
+    });
     p += 46 + nameLen + extraLen + commentLen;
   }
-  throw new Error(`Couldn't find ${wanted} inside the document.`);
+  return entries;
+}
+
+async function readZipEntryBytes(buf, entry) {
+  const data = new Uint8Array(buf).subarray(entry.dataStart, entry.dataStart + entry.compSize);
+  if (entry.method === 0) return data;
+  if (entry.method !== 8) throw new Error('Unsupported compression in this file.');
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function unzipEntry(buf, wanted) {
+  const entry = listZipEntries(buf).find(e => e.name === wanted);
+  if (!entry) throw new Error(`Couldn't find ${wanted} inside the document.`);
+  return new TextDecoder().decode(await readZipEntryBytes(buf, entry));
+}
+
+// A .zip dropped into step ② is opened and its files queued one by one.
+// Mac clutter (__MACOSX, .DS_Store, ._ files) is ignored, and a PDF with the
+// same name as a spreadsheet in the zip is skipped as a copy of it, so a
+// month isn't counted twice.
+const ZIP_MEDIA_TYPES = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', csv: 'text/csv', txt: 'text/plain' };
+async function expandZipFiles(files) {
+  const out = [];
+  const notes = [];
+  for (const file of files) {
+    if (!/\.zip$/i.test(file.name)) { out.push(file); continue; }
+    const buf = await file.arrayBuffer();
+    const entries = listZipEntries(buf).filter(e => {
+      const base = e.name.split('/').pop();
+      return base && !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && !base.startsWith('.')
+        && uploadFileKind({ name: base }) !== 'unknown';
+    });
+    const stem = n => n.split('/').pop().replace(/\.[^.]+$/, '').trim().toLowerCase();
+    const sheetStems = new Set(entries.filter(e => /\.(xlsx|xls|csv)$/i.test(e.name)).map(e => stem(e.name)));
+    let added = 0, skippedPdf = 0;
+    for (const e of entries) {
+      if (/\.pdf$/i.test(e.name) && sheetStems.has(stem(e.name))) { skippedPdf++; continue; }
+      const base = e.name.split('/').pop().trim();
+      const ext = base.split('.').pop().toLowerCase();
+      out.push(new File([await readZipEntryBytes(buf, e)], base, { type: ZIP_MEDIA_TYPES[ext] || '' }));
+      added++;
+    }
+    notes.push(`Opened ${file.name}: ${added} file${added !== 1 ? 's' : ''} added${skippedPdf ? `, ${skippedPdf} PDF${skippedPdf !== 1 ? 's' : ''} skipped as copies of the spreadsheets with the same name` : ''}.`);
+  }
+  if (notes.length) setAlert(notes.join(' '), 'info');
+  return out;
 }
 
 async function readDocumentText(file) {
@@ -2923,7 +3072,7 @@ function buildStatement(allRows) {
   const all = allRows
     .map(r => r.map(c => String(c ?? '').trim()))
     .filter(r => r.some(c => c !== ''));
-  const empty = { header: [], records: [], descCol: -1, dateCol: -1, amountCol: -1, inCol: -1, outCol: -1 };
+  const empty = { header: [], records: [], descCol: -1, descCols: [], dateCol: -1, amountCol: -1, amountIsCost: false, buCols: [], inCol: -1, outCol: -1 };
   if (!all.length) return empty;
   let headerIdx = all.slice(0, 15).findIndex(r => r.some(c => /\bdate\b/i.test(c) && c.length < 30));
   if (headerIdx < 0) headerIdx = 0;
@@ -2931,19 +3080,38 @@ function buildStatement(allRows) {
   const exact = /^(transaction )?(description|details|narrative|memo|particulars)$/i;
   const loose = /descr|detail|narrat|memo|particular/i;
   let descCol = baseHeader.findIndex(h => exact.test(h));
-  if (descCol < 0) descCol = baseHeader.findIndex(h => loose.test(h));
+  // No proper Description column (e.g. an expense app's "Type / Detail /
+  // Note" columns): join those describing columns, in sheet order.
+  let descCols = [];
+  if (descCol < 0) {
+    descCols = baseHeader.map((h, i) => /^(type|category|item|detail|details|note|notes|memo|comment|comments|what)$/i.test(h.trim()) || loose.test(h) ? i : -1).filter(i => i >= 0);
+    descCol = descCols.length ? descCols[0] : -1;
+    if (descCols.length < 2) descCols = [];
+  }
   const dateCol = Math.max(0, baseHeader.findIndex(h => /\bdate\b/i.test(h)));
-  const amountCol = baseHeader.findIndex(h => /^(amount|value|transaction amount|amount \(gbp\)|amount gbp)$/i.test(h));
+  let amountCol = baseHeader.findIndex(h => /^(amount|value|transaction amount|amount \(gbp\)|amount gbp)$/i.test(h));
+  // An expense list's amount column ("Cost", "Cost/bill", "Price", "Spend"):
+  // positive figures there are money out, not money in.
+  const costCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /^(cost|cost\s*\/\s*bill|bill|price|spend|expense|amount spent)$/i.test(h));
+  if (costCol >= 0) amountCol = costCol;
+  // The client's business-use share for each line ("% Claim", "Business
+  // use %"); a sheet can have more than one such column — the first with a
+  // value on a row is used.
+  const buCols = baseHeader.map((h, i) => /%\s*claim|claim\s*%|business\s*use|bus(iness)?\s*%|%\s*business/i.test(h) ? i : -1).filter(i => i >= 0);
   const outCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid out|money out|debit|withdrawal/i.test(h));
   const inCol = amountCol >= 0 ? -1 : baseHeader.findIndex(h => /paid in|money in|credit|deposit/i.test(h));
 
   const records = [];
   let section = '', anySection = false;
+  const amountCols = [amountCol, outCol, inCol].filter(i => i >= 0);
   for (const r of all.slice(headerIdx + 1)) {
     const filled = r.filter(c => c !== '');
     if (filled.length === 1 && r[0] !== '' && isNaN(parseAmount(r[0])) && !/\d{1,2}[\/\-.]\d{1,2}/.test(r[0])) {
       section = r[0]; anySection = true; continue;
     }
+    // A note line with neither a date nor an amount (e.g. "No expenses 1st
+    // to 5th April") isn't a transaction.
+    if (amountCols.length && !String(r[dateCol] || '').trim() && amountCols.every(i => isNaN(parseAmount(r[i])))) continue;
     records.push({ cells: r, section });
   }
   const header = anySection ? ['Section', ...baseHeader] : baseHeader;
@@ -2952,8 +3120,11 @@ function buildStatement(allRows) {
     header,
     records: records.map(x => anySection ? [x.section, ...x.cells] : x.cells),
     descCol: descCol < 0 ? -1 : descCol + shift,
+    descCols: descCols.map(i => i + shift),
     dateCol: dateCol + shift,
     amountCol: amountCol < 0 ? -1 : amountCol + shift,
+    amountIsCost: costCol >= 0,
+    buCols: buCols.map(i => i + shift),
     inCol: inCol < 0 ? -1 : inCol + shift,
     outCol: outCol < 0 ? -1 : outCol + shift,
   };
@@ -2961,6 +3132,22 @@ function buildStatement(allRows) {
 
 function parseBankStatementCsv(text) {
   return buildStatement(parseCsvText(text));
+}
+
+// The client's business-use share for a line, from a "% Claim"-type column:
+// { pct } (0.4 → 40, "50%" → 50, 1 → 100), { tbc: true } for "TBC" / "?",
+// or null if the sheet has no such column or the cell is empty.
+function statementBusinessUse(stmt, record) {
+  for (const col of stmt.buCols || []) {
+    const raw = String(record[col] ?? '').trim();
+    if (!raw) continue;
+    if (/^(tbc|tba|\?+|unknown)$/i.test(raw)) return { tbc: true, raw };
+    const n = parseFloat(raw.replace('%', ''));
+    if (isNaN(n)) return { tbc: true, raw };
+    const pct = raw.includes('%') || n > 1 ? n : n * 100;
+    return { pct: Math.round(pct * 100) / 100 };
+  }
+  return null;
 }
 
 // The section heading a statement line sits under ('' if none).
@@ -2985,9 +3172,26 @@ function parseAmount(v) {
 // Returns null when the file's layout doesn't say, and Claude's reading is
 // used instead.
 function statementAmount(stmt, record) {
+  // A sheet whose lines are all money in or all money out (the SA
+  // template's Income / Expenses): a negative figure is a refund.
+  if (stmt.moneyCol >= 0) {
+    const base = record[stmt.moneyCol] === 'in' ? 'in' : 'out';
+    const a = parseAmount(record[stmt.amountCol]);
+    if (isNaN(a)) return { amount: null, missing: true, direction: base };
+    return { amount: Math.abs(a), direction: a < 0 ? (base === 'in' ? 'out' : 'in') : base };
+  }
   if (stmt.amountCol >= 0) {
     const a = parseAmount(record[stmt.amountCol]);
-    if (!isNaN(a)) return { amount: Math.abs(a), direction: a < 0 ? 'out' : 'in' };
+    if (!isNaN(a)) {
+      // Expense lists: a cost is money out, a negative one a refund.
+      if (stmt.amountIsCost) return { amount: Math.abs(a), direction: a < 0 ? 'in' : 'out' };
+      return { amount: Math.abs(a), direction: a < 0 ? 'out' : 'in' };
+    }
+    // The file has an amount column but this line's cell is empty: leave
+    // the amount blank for the accountant rather than use Claude's guess.
+    if (!String(record[stmt.amountCol] ?? '').trim()) {
+      return { amount: null, missing: true, direction: stmt.amountIsCost ? 'out' : null };
+    }
   }
   if (stmt.inCol >= 0 || stmt.outCol >= 0) {
     const o = stmt.outCol >= 0 ? parseAmount(record[stmt.outCol]) : NaN;
@@ -3041,6 +3245,216 @@ function looksLikeFirmTemplate(rows, sheetNames) {
   });
 }
 
+// ── SELF ASSESSMENT TEMPLATE (Income + Expenses sheets) ─────────────────────
+// A workbook with "Income" and "Expenses" sheets, each with a title row
+// ("<business name> | Year End: | 2025/26") over the headings Account /
+// Tax Rate / Reference / Transaction Date / Contact / Description / Amount.
+// The rows are read here, exactly as typed — amounts, descriptions,
+// contacts, references and dates come from the file — and Claude only codes
+// each line (account, VAT) through the same line-by-line reader as a bank
+// statement.
+function saTemplateColumns(row) {
+  const cells = row.map(c => String(c || '').trim().toLowerCase());
+  const find = re => cells.findIndex(c => re.test(c));
+  const cols = {
+    account: find(/^account/), tax: find(/^tax rate/), ref: find(/^reference/),
+    date: find(/date/), contact: find(/^contact|supplier|customer/),
+    desc: find(/^description/), amount: find(/^amount/),
+  };
+  return cols.account >= 0 && cols.amount >= 0 && (cols.tax >= 0 || cols.desc >= 0) ? cols : null;
+}
+
+function looksLikeSaTemplate(sheets) {
+  return sheets.some(sh => /^(income|expenses)$/i.test(sh.name.trim()) && sh.rows.slice(0, 6).some(r => saTemplateColumns(r)));
+}
+
+// "2025/26", "2025 - 2026", "2025/2026" → 2025 (the tax year's first year).
+function saTemplateYear(text) {
+  const m = String(text || '').trim().match(/^(\d{4})\s*[-\/]\s*(\d{2}|\d{4})$/);
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2].length === 2 ? m[1].slice(0, 2) + m[2] : m[2]);
+  return b === a + 1 ? a : null;
+}
+
+// The tax year a row's block belongs to, if the row is a year marker: the
+// title row ("… | Year End: | 2026/27") or a lone "2026 - 2027" line.
+function saTemplateYearMarker(row) {
+  const cells = row.map(c => String(c || '').trim());
+  const i = cells.findIndex(c => /^year\s*end/i.test(c));
+  if (i >= 0) {
+    const y = cells.slice(i + 1).map(saTemplateYear).find(Boolean);
+    if (y) return y;
+  }
+  const filled = cells.filter(Boolean);
+  return filled.length === 1 ? saTemplateYear(filled[0]) : null;
+}
+
+// Tax year order of a month: April = 0 … March = 11.
+const taxMonthPos = m => (m + 8) % 12;
+
+// A day and month inside tax year `start` (6 Apr start … 5 Apr start+1).
+function dateInTaxYear(start, month, day) {
+  const year = (month > 4 || (month === 4 && day >= 6)) ? start : start + 1;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function validDayMonth(day, month) {
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(2024, month, 0).getDate();
+}
+
+// Reads one Transaction Date cell. Clients type these as real dates, text
+// ("08.04.26") or day.month numbers (8.04 = 8 April; 9.5 = 9 May; 8.1 could
+// be 8 January or 8 October, so it's read as the month nearest the rows
+// around it). The year always comes from the tax year, as the accountant
+// did in Xero (e.g. 31/01/2025 on a 2025/26 sheet is 31/01/2026).
+// Returns { day, month, ambiguous: [m1, m2], note } or null if not a date.
+function readSaTemplateDate(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return { day: +m[3], month: +m[2], year: +m[1] };
+  m = t.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2}|\d{4})$/);
+  if (m) return { day: +m[1], month: +m[2], year: m[3].length === 2 ? 2000 + +m[3] : +m[3] };
+  m = t.match(/^(\d{1,2})\.(\d{1,2})$/);
+  if (m) {
+    const day = +m[1];
+    if (m[2].length === 2) return { day, month: +m[2] };
+    const d = +m[2];
+    // One digit after the point: 9.5 is May, but 8.1 may be 8.10 (Oct).
+    if (d === 1) return { day, month: 1, ambiguous: [1, 10] };
+    return { day, month: d };
+  }
+  return null;
+}
+
+// Builds the statement for an SA-template workbook: every Income and
+// Expenses row of the chosen tax year as one line, with the date worked out
+// and anything the accountant should check in the Section (Notes) column.
+// Returns { stmt, note }.
+function buildSaTemplateStatement(sheets, periodEndISO) {
+  const used = sheets.filter(sh => /^(income|expenses)$/i.test(sh.name.trim()));
+  // The sheet's own "Year End: 2025/26" decides the year (a later block,
+  // e.g. "2026/27" started early, is left out); the period-end date is only
+  // used when the sheet doesn't say.
+  let start = null;
+  for (const sh of used) { for (const r of sh.rows.slice(0, 3)) { const y = saTemplateYearMarker(r); if (y) { start = y; break; } } if (start !== null) break; }
+  const pe = periodEndISO ? new Date(periodEndISO + 'T00:00:00') : null;
+  if (start === null && pe && !isNaN(pe)) start = (pe.getMonth() > 3 || (pe.getMonth() === 3 && pe.getDate() >= 6)) ? pe.getFullYear() : pe.getFullYear() - 1;
+  if (start === null) throw new Error('This Self Assessment template has no "Year End" — set the "Actual period-end date" (e.g. 05/04/2026) so the right year is read.');
+  const yearLabel = `${start}/${String(start + 1).slice(2)}`;
+  // Undated lines go at the tax year end, as in the client's Xero.
+  const yearEnd = `${start + 1}-04-05`;
+
+  const header = ['Section', 'Business', 'Sheet', "Client's account", "Client's tax rate", 'Reference', 'Date', 'Contact', 'Description', 'Amount', 'Money'];
+  const C = { business: 1, sheet: 2, ref: 5, date: 6, contact: 7, desc: 8, amount: 9, money: 10 };
+  const records = [];
+  let otherYear = 0;
+  const otherYears = new Set();
+  const zero = [];
+
+  for (const sh of used) {
+    const isIncome = /income/i.test(sh.name);
+    const business = String((sh.rows[0] || [])[0] || '').trim();
+    let cols = null, block = start;
+    const sheetRecs = [];
+    for (const row of sh.rows) {
+      const hdr = saTemplateColumns(row);
+      if (hdr) { cols = cols || hdr; continue; }
+      const y = saTemplateYearMarker(row);
+      if (y) { block = y; continue; }
+      if (!cols) continue;
+      const get = k => cols[k] >= 0 ? String(row[cols[k]] || '').trim() : '';
+      const amountRaw = get('amount'), desc = get('desc'), contact = get('contact'), ref = get('ref'), account = get('account');
+      if (!amountRaw && !desc && !contact && !ref) continue;
+      if (block !== start) { otherYear++; otherYears.add(block); continue; }
+      sheetRecs.push({ get, amountRaw, desc, contact, ref, account, parsed: readSaTemplateDate(get('date')), rawDate: get('date') });
+    }
+    // Resolve "8.1"-style dates (January or October) by the rows around them.
+    sheetRecs.forEach((r, i) => {
+      if (!r.parsed || !r.parsed.ambiguous) return;
+      const near = [];
+      for (let j = i - 1; j >= 0 && near.length < 1; j--) { const p = sheetRecs[j].parsed; if (p && !p.ambiguous) near.push(p.month); }
+      for (let j = i + 1; j < sheetRecs.length && near.length < 2; j++) { const p = sheetRecs[j].parsed; if (p && !p.ambiguous) near.push(p.month); }
+      const dist = mo => near.reduce((s, n) => s + Math.abs(taxMonthPos(mo) - taxMonthPos(n)), 0);
+      const [a, b] = r.parsed.ambiguous;
+      r.parsed.month = near.length && dist(b) < dist(a) ? b : a;
+      r.parsed.note = `Date "${r.rawDate}" read as ${r.parsed.day} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][r.parsed.month - 1]} — check`;
+    });
+    for (const r of sheetRecs) {
+      const notes = [];
+      let date = yearEnd;
+      const p = r.parsed;
+      if (!r.rawDate) {
+        notes.push('No date on the sheet — year end used');
+      } else if (!p || !validDayMonth(p.day, p.month)) {
+        notes.push(`Date "${r.rawDate}" not understood — year end used, check`);
+      } else {
+        date = dateInTaxYear(start, p.month, p.day);
+        if (p.note) notes.push(p.note);
+        if (p.year && String(p.year) !== date.slice(0, 4)) notes.push(`Year corrected from ${p.year} — check`);
+      }
+      if (!isIncome && !r.account) notes.push('No account on the sheet');
+      const amt = parseAmount(r.amountRaw);
+      // A £0 line has nothing to post.
+      if (amt === 0) { zero.push(r.desc || r.ref || r.contact || r.account); continue; }
+      // The Description that goes to Xero: the client's own words; for a
+      // line with none (e.g. daily takings) its reference or category.
+      const description = r.desc || r.ref || r.contact || r.account || (isIncome ? 'Income' : 'Expense');
+      records.push([notes.join('; '), business, sh.name.trim(), r.account, r.get('tax'), r.ref, date, r.contact, description,
+        isNaN(amt) ? '' : String(amt), isIncome ? 'in' : 'out']);
+    }
+  }
+  const stmt = {
+    header, records,
+    descCol: C.desc, descCols: [], dateCol: C.date, amountCol: C.amount, amountIsCost: false,
+    buCols: [], inCol: -1, outCol: -1,
+    moneyCol: C.money, payeeCol: C.contact, refCol: C.ref, fixedDates: true,
+    promptNote: `This is the client's own Self Assessment template for tax year ${yearLabel}: their Income and Expenses sheets, one line per item. "Client's account" and "Client's tax rate" are what the client picked from a fixed list — treat them as a hint only, and code each line to this client's own chart of accounts and usual coding above (the same description is usually coded the same way as last year, even when the client picked a different category). "Business" names which of the client's businesses the sheet is for: when the chart has accounts named for that business (e.g. "<business> - Travelling expenses", "<business> Income"), code its lines to those, and never use them for another business's lines. Money in/out is in the "Money" column. Each line's Date has already been worked out — return it unchanged.`,
+  };
+  const notes = [];
+  if (otherYear) notes.push(`${otherYear} line${otherYear !== 1 ? 's' : ''} under ${[...otherYears].sort().map(y => `${y}/${String(y + 1).slice(2)}`).join(', ')} left out — only tax year ${yearLabel} was read.`);
+  if (zero.length) notes.push(`${zero.length} £0 line${zero.length !== 1 ? 's' : ''} skipped (${zero.slice(0, 5).join(', ')}).`);
+  return { stmt, note: notes.join(' ') };
+}
+
+// A workbook with one sheet per year (e.g. "2024-2025", "2025-2026"):
+// pick the sheet(s) for the UK tax year containing the period-end date, by
+// sheet name or the sheet's own "Year:" label. Returns { sheets, note };
+// throws if the workbook has year sheets but none for that year, rather
+// than read every year. Not a multi-year workbook → all sheets, no note.
+function selectSheetsForPeriod(sheets, periodEndISO) {
+  const rangeRe = /(\d{2,4})\s*[-\/]\s*(\d{2,4})/;
+  const norm = (a, b) => {
+    const y1 = a.length === 2 ? 2000 + Number(a) : Number(a);
+    const y2 = b.length === 2 ? Math.floor(y1 / 100) * 100 + Number(b) : Number(b);
+    return y2 === y1 + 1 ? y1 : null;
+  };
+  const yearOf = text => { const m = String(text || '').match(rangeRe); return m ? norm(m[1], m[2]) : null; };
+  const info = sheets.map(sh => {
+    const head = sh.rows.slice(0, 8).map(r => r.join(' ')).join(' ');
+    const labelM = head.match(/year[^0-9]{0,15}(\d{2,4}\s*[-\/]\s*\d{2,4})/i);
+    return { sh, nameYear: yearOf(sh.name), labelYear: labelM ? yearOf(labelM[1]) : null };
+  });
+  if (info.filter(i => i.nameYear || i.labelYear).length < 2) return { sheets, note: '' };
+
+  const d = periodEndISO ? new Date(periodEndISO + 'T00:00:00') : null;
+  if (!d || isNaN(d)) throw new Error('This workbook has a sheet per year — set the "Actual period-end date" (e.g. 05/04/2026) so the right year is read.');
+  const start = (d.getMonth() > 3 || (d.getMonth() === 3 && d.getDate() >= 6)) ? d.getFullYear() : d.getFullYear() - 1;
+  const label = `${start}-${String(start + 1).slice(2)}`;
+  let picked = info.filter(i => i.nameYear === start && (i.labelYear === start || i.labelYear === null));
+  if (!picked.length) picked = info.filter(i => i.nameYear === start || i.labelYear === start);
+  if (!picked.length) {
+    throw new Error(`No sheet for tax year ${label} in this workbook (sheets: ${sheets.map(s => s.name).join(', ')}). Set the "Actual period-end date" to the year you want and process again.`);
+  }
+  const notes = [`Read sheet${picked.length > 1 ? 's' : ''} ${picked.map(i => `"${i.sh.name}"`).join(', ')} for tax year ${label} (from the period-end date); ${info.length - picked.length} other year sheet${info.length - picked.length !== 1 ? 's' : ''} ignored.`];
+  picked.forEach(i => {
+    if (i.nameYear && i.labelYear && i.nameYear !== i.labelYear) {
+      notes.push(`Sheet "${i.sh.name}" says "Year: ${i.labelYear}-${String(i.labelYear + 1).slice(2)}" inside — check it's the right year.`);
+    }
+  });
+  return { sheets: picked.map(i => i.sh), note: notes.join(' ') };
+}
+
 // A spreadsheet that's neither as plain text for the free-form reader:
 // each row as "cell | cell | cell", each sheet under its name.
 function sheetsAsText(sheets) {
@@ -3064,7 +3478,7 @@ function looksLikeStatementSheet(rows, sheetNames) {
     const cells = r.map(c => String(c || '').trim().replace(/^\*/, '').toLowerCase());
     if (cells[0]?.startsWith('post') && (cells[1] || '').includes('account')) return false;
     const hasDate = cells.some(c => /\bdate\b/.test(c) && c.length < 30);
-    const hasAmount = cells.some(c => /^(amount|value|paid in|paid out|money in|money out|debit|credit)\b/.test(c));
+    const hasAmount = cells.some(c => /^(amount|value|paid in|paid out|money in|money out|debit|credit)\b/.test(c) || /^(cost|cost\s*\/\s*bill|bill|price|spend|expense|amount spent)$/.test(c));
     if (hasDate && hasAmount) return true;
   }
   return false;
@@ -3073,7 +3487,9 @@ function looksLikeStatementSheet(rows, sheetNames) {
 // The bank's own wording for a statement line: its Description column,
 // or — if the file has no recognisable one — the whole line.
 function originalBankDescription(stmt, record) {
-  const raw = stmt.descCol >= 0 ? record[stmt.descCol] : record.filter(c => c !== '').join(', ');
+  const raw = (stmt.descCols && stmt.descCols.length)
+    ? stmt.descCols.map(i => String(record[i] || '').trim()).filter(Boolean).join(' — ')
+    : stmt.descCol >= 0 ? record[stmt.descCol] : record.filter(c => c !== '').join(', ');
   return String(raw || '').replace(/\s+/g, ' ').trim();
 }
 
@@ -3163,10 +3579,12 @@ const BANK_TRANSACTIONS_SCHEMA = {
   additionalProperties: false,
 };
 
-async function callBankStatementExtraction(text) {
+// `promptNote` (optional) describes a file this reader was given in its own
+// layout (e.g. the SA template), and replaces the year-typo hint.
+async function callBankStatementExtraction(text, fileLabel, promptNote) {
   const { sample } = await getCaps();
   if (!sample) throw new Error('Asking Claude is not available in this view.');
-  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\nEach line of the data starts with a "Line" number. Return the transactions as {"transactions": [ ... ]}, exactly one entry per line, in the shape described above, plus "line" — that line's Line number, unchanged.\n\nHere is the bank statement data:\n\n${text}`;
+  const prompt = `${buildBankStatementExtractionSystemPrompt()}\n\n${promptNote ? `${promptNote} ` : fileLabel ? `The file is "${fileLabel}". If a line's date has an obvious year typo that doesn't fit the period in the file name (e.g. 2023-12-31 in a "Dec 2024" file), give the corrected date and say so in "issues". ` : ''}Each line of the data starts with a "Line" number. Return the transactions as {"transactions": [ ... ]}, exactly one entry per line, in the shape described above, plus "line" — that line's Line number, unchanged.\n\nHere is the bank statement data:\n\n${text}`;
   let parsed;
   try {
     parsed = await sample.json(prompt, { schema: BANK_TRANSACTIONS_SCHEMA, modelTier: 'default', cache: false });
@@ -3190,7 +3608,8 @@ async function callBankStatementExtraction(text) {
 function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   // Amount and money in/out come from the file when its columns say so;
   // Claude's reading is only used when they don't.
-  const direction = fromFile ? fromFile.direction : (t.direction === 'in' ? 'in' : 'out');
+  const claudeDirection = t.direction === 'in' ? 'in' : 'out';
+  const direction = fromFile && fromFile.direction ? fromFile.direction : claudeDirection;
   const amount = fromFile ? fromFile.amount : t.amount;
   const found = t.accountCode ? ACCOUNTS.find(a => a.code === String(t.accountCode)) : null;
   const accFull = found ? `${found.code} - ${found.name}` : '';
@@ -3201,6 +3620,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const desc = original || t.description || '';
   const notes = [];
   if (section) notes.push(section);
+  if (fromFile && fromFile.missing) notes.push("No amount on the client's sheet — enter it");
   if (!original) notes.push(opts.unmatchedNote || "Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
@@ -3212,9 +3632,21 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   // with a 30% business figure next to it) — never on Use of Home rows.
   let bu = '';
   const pct = Number(t.businessUsePercent);
-  if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
+  const fileBu = opts.fileBu;
+  if (fileBu && fileBu.tbc) {
+    notes.push(`Business use is "${fileBu.raw}" on the client's sheet — decide the % before exporting`);
+  } else if (fileBu && fileBu.pct !== undefined) {
+    // The client's own % from the file; 100% needs no adjustment.
+    if (fileBu.pct > 0 && fileBu.pct < 100 && !isHome213(accFull)) bu = fileBu.pct;
+    else if (fileBu.pct === 0) notes.push("Client's sheet claims 0% business use — check");
+  } else if (t.businessUsePercent !== null && t.businessUsePercent !== undefined && !isNaN(pct) && pct > 0 && pct < 100 && !isHome213(accFull)) {
     bu = Math.round(pct * 100) / 100;
     notes.push(`AI set business use to ${bu}% — verify`);
+  }
+  // A date Claude changed (e.g. a year typo in the client's sheet) is shown,
+  // so the correction is visible rather than silent.
+  if (!opts.fixedDate && opts.fileDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.fileDate) && t.date && t.date !== opts.fileDate) {
+    notes.push(`Date corrected from ${opts.fileDate} — check`);
   }
   // Car costs are usually partly private: flag one that came through at
   // 100% so it isn't exported in full by mistake.
@@ -3233,9 +3665,9 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
     post: 'YES',
     acc: accFull,
     vat: vat,
-    ref: '',
-    date: t.date || '',
-    supplier: t.payee || '',
+    ref: opts.fileRef || '',
+    date: (opts.fixedDate ? opts.fileDate : t.date) || '',
+    supplier: (opts.filePayee !== undefined ? opts.filePayee : t.payee) || '',
     desc: desc,
     notes: joinNotes(notes),
     gross: (amount === null || amount === undefined || isNaN(Number(amount))) ? '' : Math.abs(Number(amount)),
@@ -3267,7 +3699,11 @@ function buildDocumentExtractionSystemPrompt(fallbackDate) {
 Return one entry per real item of income or cost — nothing missed, nothing counted twice:
 - Monthly income/takings: one entry per month, money in.
 - Each cost mentioned: one entry, money out. Where a cell holds several costs, return each separately.
-- Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
+- Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them.
+- A grid of monthly figures by category (months down, categories across, or the reverse): one entry per non-zero cell in each real category column. Skip computed columns and rows — "Total Income", "Total Expenditure", "Month Total", "Year Total", and the client's own "Tax" / "Final" / profit workings. For a grid cell, give "sourceText" as "<column heading> | <row label> | <value as shown>", e.g. "Petrol | September | 169.64".
+- A row of short notes under the category headings (e.g. "motor", "Direct costs", "travel") is the accountant's coding for those categories — follow it.
+- Benefits such as Universal Credit are not business income: include them, but with "likelyNonBusiness" true.
+- Use only the year being read; ignore any other years. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
 
 For each entry:
 - "date" — YYYY-MM-DD. If the document covers a UK tax year (e.g. "25/26" = 6 April 2025 to 5 April 2026), date a monthly figure at the end of that month within the tax year (April → 2025-04-30, … March → 2026-03-31). Date an annual or undated figure at the end of the period the document itself covers (e.g. "2024/2025" or "25/26" as a UK tax year → 5 April 2025 / 5 April 2026)${fallbackDate ? `; only if the document doesn't say which period it covers, use ${fallbackDate}` : ''}.
@@ -3347,7 +3783,13 @@ async function parseDocumentFile(file, onProgress, preparedText) {
   let unverified = 0;
   items.forEach(t => {
     const quoted = String(t.sourceText || '').replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
-    const verified = quoted && haystack.includes(normaliseForMatch(quoted)) ? quoted : null;
+    // A grid cell is quoted as its parts — "Petrol | September | 169.64"
+    // (column heading | row label | value): accept it when every part is in
+    // the document. Otherwise the quote must appear as typed.
+    const parts = String(t.sourceText || '').split('|').map(normaliseForMatch).filter(Boolean);
+    const whole = quoted && haystack.includes(normaliseForMatch(quoted));
+    const asParts = parts.length >= 2 && parts.every(pt => haystack.includes(pt));
+    const verified = (whole || asParts) ? (asParts && !whole ? String(t.sourceText).split('|').map(x => x.trim()).filter(Boolean).join(' — ') : quoted) : null;
     if (!verified) unverified++;
     const row = mapBankRowToInternal(t, verified, null, '', {
       unmatchedNote: "Couldn't find this wording in the document — Description is Claude's, check it",
@@ -3373,7 +3815,7 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
     while (next < batches.length) {
       const i = next++;
       try {
-        results[i] = { rows: await callBankStatementExtraction(statementBatchText(stmt, batches[i])) };
+        results[i] = { rows: await callBankStatementExtraction(statementBatchText(stmt, batches[i]), label, stmt.promptNote) };
       } catch (e) {
         results[i] = { error: e.message || String(e) };
       }
@@ -3395,7 +3837,13 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
       const matched = sent.has(n) && !seen.has(n);
       if (matched) seen.add(n);
       const rec = matched ? stmt.records[n - 1] : null;
-      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : ''));
+      addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : '', {
+        fileBu: rec ? statementBusinessUse(stmt, rec) : null,
+        fileDate: rec ? String(rec[stmt.dateCol] || '') : '',
+        fixedDate: !!(rec && stmt.fixedDates),
+        filePayee: rec && stmt.payeeCol >= 0 ? rec[stmt.payeeCol] : undefined,
+        fileRef: rec && stmt.refCol >= 0 ? rec[stmt.refCol] : '',
+      }));
       added++;
     });
     batches[i].forEach(n => { if (!seen.has(n)) skipped.push(n); });
@@ -3508,7 +3956,15 @@ async function processUnifiedQueue() {
         // rather than the firm's expense template goes through the same
         // line-by-line reader as a bank CSV.
         const sheet = await readSheetRows(item.file);
-        if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
+        if (looksLikeSaTemplate(sheet.sheets)) {
+          // The client's Self Assessment template (Income + Expenses sheets).
+          const sa = buildSaTemplateStatement(sheet.sheets, document.getElementById('customQuarterDate')?.value || '');
+          const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, sa.stmt);
+          item.addedCount = result.added;
+          item.warning = [sa.note, result.warning].filter(Boolean).join(' ') || null;
+          item.retry = result.retry || null;
+          if (result.added) setExportType('bank');
+        } else if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
           const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, buildStatement(sheet.rows));
           item.addedCount = result.added;
           item.warning = result.warning || null;
@@ -3519,9 +3975,10 @@ async function processUnifiedQueue() {
         } else {
           // Anything else (e.g. a client's own year summary laid out as a
           // list) goes through the free-form reader, like an .odt/.docx.
-          const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; }, sheetsAsText(sheet.sheets));
+          const chosen = selectSheetsForPeriod(sheet.sheets, document.getElementById('customQuarterDate')?.value || '');
+          const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; }, sheetsAsText(chosen.sheets));
           item.addedCount = result.added;
-          item.warning = result.warning || null;
+          item.warning = [chosen.note, result.warning].filter(Boolean).join(' ') || null;
           if (result.added) setExportType('bank');
         }
       } else if (kind === 'msg') {
@@ -4644,15 +5101,14 @@ function csvEsc(val) {
 calcHome();
 loadClientList();
 
-// Set current year as default
-document.getElementById('yearInput').value = new Date().getFullYear();
-
-// Set period end to current quarter as a default (still editable free text)
-const qLabelMap = {0:'March',1:'March',2:'March',3:'June',4:'June',5:'June',6:'September',7:'September',8:'September',9:'December',10:'December',11:'December'};
-const qDateMap = {0:'-03-31',1:'-03-31',2:'-03-31',3:'-06-30',4:'-06-30',5:'-06-30',6:'-09-30',7:'-09-30',8:'-09-30',9:'-12-31',10:'-12-31',11:'-12-31'};
-const _m = new Date().getMonth();
-document.getElementById('quarter').value = qLabelMap[_m];
-document.getElementById('customQuarterDate').value = document.getElementById('yearInput').value + qDateMap[_m];
+// Default period: the most recent tax year end (YE-5 April) that has passed.
+(() => {
+  const now = new Date();
+  const afterYe = now.getMonth() > 3 || (now.getMonth() === 3 && now.getDate() >= 6);
+  document.getElementById('yearInput').value = afterYe ? now.getFullYear() : now.getFullYear() - 1;
+  document.getElementById('quarter').value = 'YE-5 April';
+  onPeriodChange();
+})();
 
 refreshExportBtn();
 refreshProcessAllBtn();
