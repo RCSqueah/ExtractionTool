@@ -3136,6 +3136,44 @@ function looksLikeFirmTemplate(rows, sheetNames) {
   });
 }
 
+// A workbook with one sheet per year (e.g. "2024-2025", "2025-2026"):
+// pick the sheet(s) for the UK tax year containing the period-end date, by
+// sheet name or the sheet's own "Year:" label. Returns { sheets, note };
+// throws if the workbook has year sheets but none for that year, rather
+// than read every year. Not a multi-year workbook → all sheets, no note.
+function selectSheetsForPeriod(sheets, periodEndISO) {
+  const rangeRe = /(\d{2,4})\s*[-\/]\s*(\d{2,4})/;
+  const norm = (a, b) => {
+    const y1 = a.length === 2 ? 2000 + Number(a) : Number(a);
+    const y2 = b.length === 2 ? Math.floor(y1 / 100) * 100 + Number(b) : Number(b);
+    return y2 === y1 + 1 ? y1 : null;
+  };
+  const yearOf = text => { const m = String(text || '').match(rangeRe); return m ? norm(m[1], m[2]) : null; };
+  const info = sheets.map(sh => {
+    const head = sh.rows.slice(0, 8).map(r => r.join(' ')).join(' ');
+    const labelM = head.match(/year[^0-9]{0,15}(\d{2,4}\s*[-\/]\s*\d{2,4})/i);
+    return { sh, nameYear: yearOf(sh.name), labelYear: labelM ? yearOf(labelM[1]) : null };
+  });
+  if (info.filter(i => i.nameYear || i.labelYear).length < 2) return { sheets, note: '' };
+
+  const d = periodEndISO ? new Date(periodEndISO + 'T00:00:00') : null;
+  if (!d || isNaN(d)) throw new Error('This workbook has a sheet per year — set the "Actual period-end date" (e.g. 05/04/2026) so the right year is read.');
+  const start = (d.getMonth() > 3 || (d.getMonth() === 3 && d.getDate() >= 6)) ? d.getFullYear() : d.getFullYear() - 1;
+  const label = `${start}-${String(start + 1).slice(2)}`;
+  let picked = info.filter(i => i.nameYear === start && (i.labelYear === start || i.labelYear === null));
+  if (!picked.length) picked = info.filter(i => i.nameYear === start || i.labelYear === start);
+  if (!picked.length) {
+    throw new Error(`No sheet for tax year ${label} in this workbook (sheets: ${sheets.map(s => s.name).join(', ')}). Set the "Actual period-end date" to the year you want and process again.`);
+  }
+  const notes = [`Read sheet${picked.length > 1 ? 's' : ''} ${picked.map(i => `"${i.sh.name}"`).join(', ')} for tax year ${label} (from the period-end date); ${info.length - picked.length} other year sheet${info.length - picked.length !== 1 ? 's' : ''} ignored.`];
+  picked.forEach(i => {
+    if (i.nameYear && i.labelYear && i.nameYear !== i.labelYear) {
+      notes.push(`Sheet "${i.sh.name}" says "Year: ${i.labelYear}-${String(i.labelYear + 1).slice(2)}" inside — check it's the right year.`);
+    }
+  });
+  return { sheets: picked.map(i => i.sh), note: notes.join(' ') };
+}
+
 // A spreadsheet that's neither as plain text for the free-form reader:
 // each row as "cell | cell | cell", each sheet under its name.
 function sheetsAsText(sheets) {
@@ -3378,7 +3416,11 @@ function buildDocumentExtractionSystemPrompt(fallbackDate) {
 Return one entry per real item of income or cost — nothing missed, nothing counted twice:
 - Monthly income/takings: one entry per month, money in.
 - Each cost mentioned: one entry, money out. Where a cell holds several costs, return each separately.
-- Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
+- Totals and subtotals that only add up items already listed (e.g. "Total income", "Total expenses") are NOT entries — skip them.
+- A grid of monthly figures by category (months down, categories across, or the reverse): one entry per non-zero cell in each real category column. Skip computed columns and rows — "Total Income", "Total Expenditure", "Month Total", "Year Total", and the client's own "Tax" / "Final" / profit workings. For a grid cell, give "sourceText" as "<column heading> | <row label> | <value as shown>", e.g. "Petrol | September | 169.64".
+- A row of short notes under the category headings (e.g. "motor", "Direct costs", "travel") is the accountant's coding for those categories — follow it.
+- Benefits such as Universal Credit are not business income: include them, but with "likelyNonBusiness" true.
+- Use only the year being read; ignore any other years. But if a total is the only figure given for a kind of cost (e.g. a year's fuel shown only on a totals row), use it as that cost's entry and say so in "issues".
 
 For each entry:
 - "date" — YYYY-MM-DD. If the document covers a UK tax year (e.g. "25/26" = 6 April 2025 to 5 April 2026), date a monthly figure at the end of that month within the tax year (April → 2025-04-30, … March → 2026-03-31). Date an annual or undated figure at the end of the period the document itself covers (e.g. "2024/2025" or "25/26" as a UK tax year → 5 April 2025 / 5 April 2026)${fallbackDate ? `; only if the document doesn't say which period it covers, use ${fallbackDate}` : ''}.
@@ -3458,7 +3500,13 @@ async function parseDocumentFile(file, onProgress, preparedText) {
   let unverified = 0;
   items.forEach(t => {
     const quoted = String(t.sourceText || '').replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
-    const verified = quoted && haystack.includes(normaliseForMatch(quoted)) ? quoted : null;
+    // A grid cell is quoted as its parts — "Petrol | September | 169.64"
+    // (column heading | row label | value): accept it when every part is in
+    // the document. Otherwise the quote must appear as typed.
+    const parts = String(t.sourceText || '').split('|').map(normaliseForMatch).filter(Boolean);
+    const whole = quoted && haystack.includes(normaliseForMatch(quoted));
+    const asParts = parts.length >= 2 && parts.every(pt => haystack.includes(pt));
+    const verified = (whole || asParts) ? (asParts && !whole ? String(t.sourceText).split('|').map(x => x.trim()).filter(Boolean).join(' — ') : quoted) : null;
     if (!verified) unverified++;
     const row = mapBankRowToInternal(t, verified, null, '', {
       unmatchedNote: "Couldn't find this wording in the document — Description is Claude's, check it",
@@ -3633,9 +3681,10 @@ async function processUnifiedQueue() {
         } else {
           // Anything else (e.g. a client's own year summary laid out as a
           // list) goes through the free-form reader, like an .odt/.docx.
-          const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; }, sheetsAsText(sheet.sheets));
+          const chosen = selectSheetsForPeriod(sheet.sheets, document.getElementById('customQuarterDate')?.value || '');
+          const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; }, sheetsAsText(chosen.sheets));
           item.addedCount = result.added;
-          item.warning = result.warning || null;
+          item.warning = [chosen.note, result.warning].filter(Boolean).join(' ') || null;
           if (result.added) setExportType('bank');
         }
       } else if (kind === 'msg') {
