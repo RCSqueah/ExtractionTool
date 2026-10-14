@@ -20,6 +20,7 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
 
   Step ① takes last year's Xero Account Transactions export; one **Process everything** press reads both. It also picks out last year's business-use adjustments (e.g. "Motor expenses 60% business use", "Use of Home 1 of 4 rooms") and shows them under the client for reference.
 - **Client data**: client lists, charts of accounts, coding history and notes are saved in your browser. Use **⚙ Settings → Back up client data** now and then, because clearing browser data deletes them. **Restore from backup** brings them back, or moves them to another computer or browser.
+- **Shared client data (password-protected)**: ⚙ Settings → **Create encrypted copy** scrambles the client data in this browser with a password you choose, into `client-data.enc.json`. Upload that file to the `docs` folder here on GitHub. Any browser that then opens the site asks for the password once and loads the data. The file on GitHub is unreadable without the password, which is never stored anywhere. Use four or five random words. If the password is forgotten, the shared copy can't be opened, but each browser's own copy and your backups are unaffected. To publish changes, create a new encrypted copy and upload it over the old one.
 
 | File | What it does |
 |---|---|
@@ -38,7 +39,7 @@ After this, every change merged into `main` goes live automatically.
 
 ## Notes
 
-- **Privacy**: documents go directly from your browser to Anthropic and nowhere else. Your key is never in the code or on GitHub. Anyone else who opens the site won't have a key, so they can't use your credit or see your data.
+- **Privacy**: documents go directly from your browser to Anthropic and nowhere else. This repo is public, so client details are only ever published encrypted (see above). Your key is never in the code or on GitHub. Anyone else who opens the site won't have a key, so they can't use your credit or see your data.
 - **Cost**: you pay Anthropic per request. A typical document or email costs a penny or two on the default model (`claude-sonnet-5`); a year's bank statement roughly 10–15p.
 - **Private repositories**: GitHub Pages on a private repo needs a paid GitHub plan. The site itself holds no client data or keys, so a public repo is fine.
 - **Live Xero lookup** ("Check Xero history") is hidden until it can be rebuilt. Uploading a Xero export file in Step 1 does the same job.

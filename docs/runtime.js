@@ -273,39 +273,18 @@
   };
 
   window.downloadBackup = function () {
-    const docs = {};
-    lsKeys().filter(k => k.startsWith(DB_PREFIX)).forEach(k => {
-      try { docs[k.slice(DB_PREFIX.length)] = JSON.parse(lsGet(k)); } catch (_) { /* skip corrupt */ }
-    });
+    const docs = collectDocs();
     const backup = { app: 'expense-parser', version: 1, savedAt: new Date().toISOString(), docs };
     const stamp = new Date().toISOString().slice(0, 10);
     saveFile(`expense-parser-backup-${stamp}.json`, new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
     setStatus(`✓ Backed up ${Object.keys(docs).length} record${Object.keys(docs).length !== 1 ? 's' : ''}.`);
   };
 
-  window.restoreBackup = async function (file) {
-    if (!file) return;
-    let backup;
-    try {
-      backup = JSON.parse(await file.text());
-    } catch (_) {
-      setStatus('That file is not a valid backup.');
-      return;
-    }
-    if (!backup || backup.app !== 'expense-parser' || !backup.docs || typeof backup.docs !== 'object') {
-      setStatus('That file is not an Expense Parser backup.');
-      return;
-    }
-    const entries = Object.entries(backup.docs);
-    // Restoring replaces records with the same name; anything not in the
-    // backup is left alone. A starter pack ("merge": true) only adds: clients
-    // join the existing list, and a client already set up keeps its own
-    // coding, notes and settings, gaining only what it doesn't have yet.
-    const merge = backup.merge === true;
-    const question = merge
-      ? `Add ${entries.length} record(s) from "${backup.title || 'this starter pack'}"? Clients you've already set up keep their own coding — only missing accounts and coding rules are added.`
-      : `Restore ${entries.length} record(s) from ${backup.savedAt || 'this backup'}? Records with the same name will be replaced.`;
-    if (!confirm(question)) return;
+  // Writes backup records into this browser. With `merge`, nothing already
+  // here is replaced: clients join the existing list, and a client already
+  // set up keeps its own coding, notes and settings, gaining only what it
+  // doesn't have yet. Returns false if storage is blocked or full.
+  function applyDocs(docs, merge) {
     const readDoc = path => { try { return JSON.parse(lsGet(DB_PREFIX + path) || 'null'); } catch (_) { return null; } };
     const mergeDoc = (path, incoming) => {
       const old = readDoc(path);
@@ -323,13 +302,153 @@
       if (!Array.isArray(old.adjustments) || !old.adjustments.length) out.adjustments = incoming.adjustments || [];
       return out;
     };
-    for (const [path, obj] of entries) {
-      if (!lsSet(DB_PREFIX + path, JSON.stringify(merge ? mergeDoc(path, obj) : obj))) {
-        setStatus('Could not restore — this browser is blocking storage or it is full.');
-        return;
-      }
+    for (const [path, obj] of Object.entries(docs)) {
+      if (!lsSet(DB_PREFIX + path, JSON.stringify(merge ? mergeDoc(path, obj) : obj))) return false;
+    }
+    return true;
+  }
+
+  function collectDocs() {
+    const docs = {};
+    lsKeys().filter(k => k.startsWith(DB_PREFIX)).forEach(k => {
+      try { docs[k.slice(DB_PREFIX.length)] = JSON.parse(lsGet(k)); } catch (_) { /* skip corrupt */ }
+    });
+    return docs;
+  }
+
+  window.restoreBackup = async function (file) {
+    if (!file) return;
+    let backup;
+    try {
+      backup = JSON.parse(await file.text());
+    } catch (_) {
+      setStatus('That file is not a valid backup.');
+      return;
+    }
+    if (!backup || backup.app !== 'expense-parser' || !backup.docs || typeof backup.docs !== 'object') {
+      setStatus('That file is not an Expense Parser backup.');
+      return;
+    }
+    const entries = Object.entries(backup.docs);
+    // Restoring replaces records with the same name; anything not in the
+    // backup is left alone. A starter pack ("merge": true) only adds (see
+    // applyDocs).
+    const merge = backup.merge === true;
+    const question = merge
+      ? `Add ${entries.length} record(s) from "${backup.title || 'this starter pack'}"? Clients you've already set up keep their own coding — only missing accounts and coding rules are added.`
+      : `Restore ${entries.length} record(s) from ${backup.savedAt || 'this backup'}? Records with the same name will be replaced.`;
+    if (!confirm(question)) return;
+    if (!applyDocs(backup.docs, merge)) {
+      setStatus('Could not restore — this browser is blocking storage or it is full.');
+      return;
     }
     setStatus('✓ Restored — reloading…');
     setTimeout(() => location.reload(), 600);
   };
+
+  // ── Password-protected shared copy of the client data ─────────────────────
+  // The site is public, so client data is only ever published encrypted:
+  // ⚙ Settings → "Create encrypted copy" scrambles this browser's client
+  // data with a password (AES-GCM, key from PBKDF2-SHA256) into
+  // client-data.enc.json, which goes in the repo's docs/ folder. On opening
+  // the site, a browser that hasn't loaded that copy yet asks for the
+  // password and adds the data (merging, as a starter pack does). The
+  // password is never stored or sent anywhere; without it the file is
+  // unreadable.
+  const SHARED_FILE = 'client-data.enc.json';
+  const KEY_SHARED_VERSION = 'ep:sharedVersion';
+  const PBKDF2_ITERATIONS = 600000;
+  const b64 = bytes => {
+    const u = new Uint8Array(bytes);
+    let bin = '';
+    for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+  const unb64 = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
+
+  async function passwordKey(password, salt, iterations) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+
+  async function encryptDocs(docs, password) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await passwordKey(password, salt, PBKDF2_ITERATIONS);
+    const plain = JSON.stringify({ app: 'expense-parser', version: 1, merge: true, title: 'shared client data', savedAt: new Date().toISOString(), docs });
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plain));
+    return { app: 'expense-parser-encrypted', version: 1, kdf: 'PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt: b64(salt), iv: b64(iv), data: b64(data), createdAt: new Date().toISOString() };
+  }
+
+  // Returns the backup object, or throws 'wrong_password'.
+  async function decryptShared(file, password) {
+    const key = await passwordKey(password, unb64(file.salt), file.iterations || PBKDF2_ITERATIONS);
+    let plain;
+    try {
+      plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(file.iv) }, key, unb64(file.data));
+    } catch (_) {
+      throw codedError('wrong_password', 'Wrong password.');
+    }
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  window.createEncryptedCopy = async function () {
+    const p1 = document.getElementById('sharedPw1').value;
+    const p2 = document.getElementById('sharedPw2').value;
+    if (p1.length < 12) { setStatus('Use a password of at least 12 characters — ideally four or five random words.'); return; }
+    if (p1 !== p2) { setStatus("The two passwords don't match."); return; }
+    const docs = collectDocs();
+    if (!Object.keys(docs).length) { setStatus('There is no client data in this browser to encrypt yet.'); return; }
+    setStatus('Encrypting…');
+    const file = await encryptDocs(docs, p1);
+    saveFile(SHARED_FILE, new Blob([JSON.stringify(file)], { type: 'application/json' }));
+    lsSet(KEY_SHARED_VERSION, file.salt); // this browser already has this data
+    document.getElementById('sharedPw1').value = '';
+    document.getElementById('sharedPw2').value = '';
+    setStatus(`✓ Saved ${SHARED_FILE} (${Object.keys(docs).length} records). Upload it to the docs folder on GitHub to publish it.`);
+  };
+
+  function hideUnlockBanner() {
+    const el = document.getElementById('unlockBanner');
+    if (el) el.style.display = 'none';
+  }
+
+  async function checkSharedCopy() {
+    let file;
+    try {
+      const res = await fetch(SHARED_FILE, { cache: 'no-store' });
+      if (!res.ok) return;
+      file = await res.json();
+    } catch (_) { return; }
+    if (!file || file.app !== 'expense-parser-encrypted' || !file.salt || !file.data) return;
+    if (lsGet(KEY_SHARED_VERSION) === file.salt) return;
+    try { if (sessionStorage.getItem('ep:unlockLater') === file.salt) return; } catch (_) { /* ignore */ }
+    const banner = document.getElementById('unlockBanner');
+    if (!banner) return;
+    banner.style.display = 'block';
+    const input = document.getElementById('unlockPassword');
+    const status = document.getElementById('unlockStatus');
+    const unlock = async () => {
+      status.textContent = 'Unlocking…';
+      try {
+        const backup = await decryptShared(file, input.value);
+        if (!backup || !backup.docs || !applyDocs(backup.docs, true)) throw codedError('db_error', 'Could not save — this browser is blocking storage or it is full.');
+        lsSet(KEY_SHARED_VERSION, file.salt);
+        status.textContent = '✓ Client data loaded — reloading…';
+        setTimeout(() => location.reload(), 500);
+      } catch (e) {
+        status.textContent = e.code === 'wrong_password' ? 'Wrong password — try again.' : (e.message || 'Could not unlock.');
+        input.select();
+      }
+    };
+    document.getElementById('unlockBtn').onclick = unlock;
+    input.onkeydown = e => { if (e.key === 'Enter') unlock(); };
+    document.getElementById('unlockLaterBtn').onclick = () => {
+      try { sessionStorage.setItem('ep:unlockLater', file.salt); } catch (_) { /* ignore */ }
+      hideUnlockBanner();
+    };
+    input.focus();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', checkSharedCopy);
+  else checkSharedCopy();
 })();

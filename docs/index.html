@@ -643,6 +643,33 @@
     <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
       Client lists, charts of accounts and coding history are saved in this browser only. Clearing browser data deletes them, so back up now and then, and restore the backup to use another computer or browser.
     </div>
+    <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:16px;">
+      <div class="field" style="margin:0;">
+        <label>Password for the shared copy</label>
+        <input type="password" id="sharedPw1" autocomplete="new-password" placeholder="e.g. four random words">
+      </div>
+      <div class="field" style="margin:0;">
+        <label>Same password again</label>
+        <input type="password" id="sharedPw2" autocomplete="new-password">
+      </div>
+      <button class="btn" type="button" onclick="createEncryptedCopy()">🔒 Create encrypted copy</button>
+    </div>
+    <div class="helptext" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+      Scrambles this browser's client data with the password into <strong>client-data.enc.json</strong>. Upload that file to the <strong>docs</strong> folder on GitHub, and any browser that opens the site asks for the password once and loads the data. Use a long password (four or five random words). It is never stored, and if it's forgotten the shared copy can't be opened.
+    </div>
+  </div>
+</div>
+
+<!-- Unlock the password-protected shared client data — see runtime.js -->
+<div id="unlockBanner" style="display:none;background:var(--surface);border-bottom:1px solid var(--border);">
+  <div style="max-width:1400px;margin:0 auto;padding:16px 24px;display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+    <div class="field" style="margin:0;min-width:260px;">
+      <label>🔒 Password to load your client data</label>
+      <input type="password" id="unlockPassword" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary" type="button" id="unlockBtn">Unlock</button>
+    <button class="btn" type="button" id="unlockLaterBtn">Not now</button>
+    <span id="unlockStatus" style="font-size:12px;color:var(--text-muted);"></span>
   </div>
 </div>
 
