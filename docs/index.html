@@ -1281,16 +1281,46 @@ function isBookkeepingEntry(supplier) {
 
 // `note` (optional) is a short reminder of how it was coded, e.g. "Car fuel
 // @ 30% business use" from the Xero history — shown to Claude with the rule.
-function recordClientRule(supplier, desc, acc, vat, note) {
+// `opts.user` marks the accountant's own correction (see
+// recordUserCorrection): it's kept as a firm rule that nothing read from a
+// file or by Claude can overwrite, and `opts.dir` ('in'/'out') limits it to
+// money in or money out.
+function recordClientRule(supplier, desc, acc, vat, note, opts = {}) {
   if (!currentClientKey || !acc || !vat) return;
   if (isBookkeepingEntry(supplier)) return;
   const key = ruleKeyFor(supplier, desc);
   if (!key) return;
   const existing = currentClientRules[key];
+  if (existing && existing.user && !opts.user) return; // your correction stays
   const keepNote = note || (existing && existing.note) || '';
-  if (existing && existing.acc === acc && existing.vat === vat && (existing.note || '') === keepNote) return; // no change
-  currentClientRules[key] = keepNote ? { acc, vat, note: keepNote } : { acc, vat };
+  const rule = keepNote ? { acc, vat, note: keepNote } : { acc, vat };
+  if (opts.user) { rule.user = true; if (opts.dir) rule.dir = opts.dir; }
+  if (existing && JSON.stringify(existing) === JSON.stringify(rule)) return; // no change
+  currentClientRules[key] = rule;
   scheduleSaveClientDoc();
+}
+
+// A row the accountant has coded by hand: remembered as a firm rule under
+// both the bank's own wording (the Description, the same every month) and
+// the supplier name, and applied ahead of Claude's choice next time.
+function recordUserCorrection(row) {
+  if (!row || !row.acc || !row.vat) return;
+  const opts = { user: true, dir: row.direction === 'in' ? 'in' : 'out' };
+  if (row.desc) recordClientRule('', row.desc, row.acc, row.vat, '', opts);
+  if (row.supplier && !isBookkeepingEntry(row.supplier)) recordClientRule(row.supplier, '', row.acc, row.vat, '', opts);
+  renderClientHistoryPanel();
+}
+
+// The accountant's own rule for a line, if any: the Description first (the
+// bank's exact wording), then the supplier — only for the same direction.
+function lookupUserRule(supplier, desc, direction) {
+  if (!currentClientKey) return null;
+  const keys = [ruleKeyFor('', desc), ruleKeyFor(supplier, '')].filter(Boolean);
+  for (const k of keys) {
+    const r = currentClientRules[k];
+    if (r && r.user && r.acc && (!r.dir || r.dir === direction)) return r;
+  }
+  return null;
 }
 
 // Compares an explicitly-stated acc/VAT (from a file or AI extraction) against
@@ -1826,7 +1856,7 @@ async function processXeroExportQueue() {
           if (it.accountCode && it.accountName && vat) {
             const s = supplierOf(it);
             const mixed = s && supplierAccounts[s].size > 1;
-            if (mixed) delete currentClientRules['supplier:' + s];
+            if (mixed && !(currentClientRules['supplier:' + s] || {}).user) delete currentClientRules['supplier:' + s];
             recordClientRule(mixed || isBookkeepingEntry(it.supplier) ? '' : it.supplier, it.description, `${it.accountCode} - ${it.accountName}`, vat, String(it.description || '').slice(0, 80));
             if (!newVatDefaults[it.accountCode]) newVatDefaults[it.accountCode] = vat;
             recorded++;
@@ -2069,7 +2099,7 @@ function renderClientHistoryPanel() {
   }
   let html = `<div style="margin-bottom:18px;">
     <div style="font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px;">Coding history for ${esc(currentClientKey)}</div>
-    <div class="helptext" style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">How this client's suppliers are usually coded, saved in this browser. Change a dropdown to correct an entry, or × to forget it.</div>
+    <div class="helptext" style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">How this client's suppliers are usually coded, saved in this browser. Change a dropdown to correct an entry, or × to forget it. <strong>✎ yours</strong> marks your own corrections (from the rows below or here): they're applied ahead of Claude's choice next time and never overwritten automatically.</div>
     <table style="width:100%;font-size:12.5px;border-collapse:collapse;">
       <thead><tr>
         <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">Matched on</th>
@@ -2077,11 +2107,12 @@ function renderClientHistoryPanel() {
         <th style="text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);">VAT rate</th>
         <th style="border-bottom:1px solid var(--border);"></th>
       </tr></thead><tbody>`;
-  keys.sort().forEach(key => {
+  keys.sort((a, b) => (currentClientRules[b].user ? 1 : 0) - (currentClientRules[a].user ? 1 : 0) || a.localeCompare(b)).forEach(key => {
     const rule = currentClientRules[key];
     const label = key.startsWith('supplier:') ? `Supplier: ${key.slice(9)}` : `Description: ${key.slice(5)}`;
+    const mine = rule.user ? ` <span title="Your own correction — applied ahead of Claude's choice and never overwritten automatically" style="font-size:10.5px;color:var(--green);white-space:nowrap;">✎ yours${rule.dir === 'in' ? ' · money in' : ''}</span>` : '';
     html += `<tr>
-      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(label)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid var(--border);">${esc(label)}${mine}</td>
       <td style="padding:3px 8px;border-bottom:1px solid var(--border);">
         <select class="history-select" onchange="updateClientRule(${esc(JSON.stringify(key))},'acc',this.value)">${historyAccOptions(rule.acc)}</select>
       </td>
@@ -2110,7 +2141,9 @@ function updateClientRule(key, field, value) {
   const rule = currentClientRules[key];
   if (!rule || !value) return;
   rule[field] = value;
+  rule.user = true; // changed by hand — now a firm rule
   scheduleSaveClientDoc();
+  renderClientHistoryPanel();
 }
 
 async function deleteClientRule(key) {
@@ -2907,12 +2940,14 @@ function buildChartOfAccountsText() {
 // Claude follows how their suppliers and expense types have actually been
 // coded rather than guessing from account names alone.
 function buildCodingHistoryText() {
-  const keys = Object.keys(currentClientRules || {}).sort().slice(0, 150);
+  const rules = currentClientRules || {};
+  // The accountant's own corrections first, so they're never cut off.
+  const keys = Object.keys(rules).sort((a, b) => (rules[b].user ? 1 : 0) - (rules[a].user ? 1 : 0) || a.localeCompare(b)).slice(0, 150);
   if (!keys.length) return '';
   const lines = keys.map(k => {
-    const r = currentClientRules[k];
+    const r = rules[k];
     const what = k.startsWith('supplier:') ? `Supplier "${k.slice(9)}"` : `"${k.slice(5)}"`;
-    return `- ${what} → ${r.acc} (${r.vat})${r.note ? ` — ${r.note}` : ''}`;
+    return `- ${what} → ${r.acc} (${r.vat})${r.note ? ` — ${r.note}` : ''}${r.user ? " — the accountant's own correction, always follow it" : ''}`;
   });
   return `\n\nTHIS CLIENT'S USUAL CODING (from their past bookkeeping — follow it for the same supplier or kind of cost):\n${lines.join('\n')}`;
 }
@@ -4383,11 +4418,23 @@ function addRow(data) {
   const desc = d.desc || '';
   let notes = d.notes || '';
 
-  // Nothing came in coded (no account) — check this client's history before
-  // leaving it blank. Only fires on genuinely blank rows, so it never
-  // overrides a value that's already come from the file, AI extraction, or
-  // a manual edit.
-  if (!acc) {
+  // The accountant's own earlier correction for this line wins over what
+  // came in (Claude's choice or the file's), and says so in Notes.
+  const mine = lookupUserRule(d.supplier, d.desc, d.direction === 'in' ? 'in' : 'out');
+  if (mine) {
+    const before = acc;
+    if (mine.acc !== acc || (!vatOverride && mine.vat && mine.vat !== vat)) {
+      acc = mine.acc;
+      if (!vatOverride && mine.vat) vat = mine.vat;
+      // A "usually coded to…" check no longer applies.
+      notes = joinNotes(notes.split(' · ').filter(n => !/^Check: this client/.test(n)));
+      notes = joinNotes([before && before !== acc ? `Coded as you corrected before (was: ${before})` : 'Coded as you corrected before', notes]);
+    }
+  } else if (!acc) {
+    // Nothing came in coded (no account) — check this client's history
+    // before leaving it blank. Only fires on genuinely blank rows, so it
+    // never overrides a value that's already come from the file, AI
+    // extraction, or a manual edit.
     const learned = lookupClientRule(d.supplier, d.desc);
     if (learned && learned.acc) {
       acc = learned.acc;
@@ -4738,7 +4785,7 @@ function onAccChange(id, val) {
     if (!row.acc || !row.vat) tr.classList.add('needs-attention');
     else tr.classList.remove('needs-attention');
   }
-  if (row.acc && row.vat) recordClientRule(row.supplier, row.desc, row.acc, row.vat);
+  recordUserCorrection(row);
   // Propagate acc+vat to rows with same description
   propagateDescMatch(id, 'acc');
   checkHomeRows();
@@ -4755,7 +4802,7 @@ function onVatChange(id, val) {
     tr.innerHTML = buildRowHTML(row);
     if (row.acc && row.vat) tr.classList.remove('needs-attention');
   }
-  if (row.acc && row.vat) recordClientRule(row.supplier, row.desc, row.acc, row.vat);
+  recordUserCorrection(row);
   // Propagate vat to rows with same description
   propagateDescMatch(id, 'vat');
   updateSummary();
