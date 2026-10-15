@@ -1568,7 +1568,39 @@ async function extractTextFromXeroExport(file) {
 // ~2 KB instruction block rather than right up against the limit.
 const XERO_EXPORT_TEXT_LIMIT = 55000; // enough for a year of transactions on most clients
 
+// Xero's own Chart of Accounts export (Accounting → Chart of accounts →
+// Export): "*Code, Report Code, *Name, …, *Type, *Tax Code, …". Read
+// directly — no need to ask Claude. Only the accounts used to code costs
+// and income are kept (not bank, balance sheet or equity accounts).
+// Returns { accounts, vatDefaults } or null if the text isn't one.
+function parseXeroChartOfAccounts(text) {
+  const rows = parseCsvText(text);
+  const h = (rows[0] || []).map(c => String(c).replace(/^\*/, '').trim().toLowerCase());
+  const code = h.indexOf('code'), name = h.indexOf('name'), type = h.indexOf('type');
+  const tax = h.findIndex(x => x === 'tax code' || x === 'tax rate');
+  if (code < 0 || name < 0 || type < 0) return null;
+  const pl = /^(revenue|sales|other income|direct costs|expense|overheads?|depreciation)$/i;
+  const accounts = [], vatDefaults = {};
+  rows.slice(1).forEach(r => {
+    const c = String(r[code] || '').trim(), n = String(r[name] || '').trim();
+    if (!c || !n || !pl.test(String(r[type] || '').trim())) return;
+    accounts.push({ code: c, name: n });
+    const v = tax >= 0 ? String(r[tax] || '').trim() : '';
+    if (VAT_RATES.includes(v)) vatDefaults[c] = v;
+  });
+  return accounts.length ? { accounts, vatDefaults } : null;
+}
+
 function buildXeroFileExtractionSystemPrompt() {
+  const known = ACCOUNTS.filter(a => !isStandardAccount(a.code));
+  const knownText = known.length ? `
+
+THIS CLIENT'S CHART OF ACCOUNTS (already known): use these codes. Some Xero exports show account names but no codes, or no tax rate column — then take the code for the same account name from this list, and the tax rate from its default shown here.
+${known.map(a => `${a.code} - ${a.name} (default VAT: ${VAT_DEFAULTS[a.code] || 'No VAT'})`).join('\n')}` : '';
+  return buildXeroFileExtractionSystemPromptBase() + knownText;
+}
+
+function buildXeroFileExtractionSystemPromptBase() {
   return `You are reading an export of a client's transaction history from Xero — e.g. an "Account Transactions" report, a bills/purchases export, or similar — covering roughly the last year. Reconstruct two things from it:
 
 1. The client's chart of accounts — every distinct account code and name actually used in this data, including income/revenue accounts as well as expense ones. Use the exact code and name as they appear; don't rename or reclassify them.
@@ -1714,7 +1746,14 @@ async function processXeroExportQueue() {
   if (nameNow !== currentClientKey) await loadClientRules();
 
   btn.disabled = true;
+  // A chart of accounts file goes first, so the exports after it can be
+  // matched to its account codes.
   const toProcess = xeroExportQueue.filter(q => q.status === 'queued');
+  for (const item of toProcess) {
+    try { item.text = await extractTextFromXeroExport(item.file); } catch (e) { item.text = null; item.readError = e; }
+  }
+  const isCoa = item => !!(item.text && parseXeroChartOfAccounts(item.text));
+  toProcess.sort((a, b) => (isCoa(b) ? 1 : 0) - (isCoa(a) ? 1 : 0));
   let totalAccounts = 0, totalRules = 0;
   const adjustments = [];
   let anyRead = false;
@@ -1724,7 +1763,16 @@ async function processXeroExportQueue() {
     renderXeroExportFileList();
     statusEl.textContent = `Reading ${item.file.name}…`;
     try {
-      const fullText = await extractTextFromXeroExport(item.file);
+      if (item.readError) throw item.readError;
+      const fullText = item.text;
+      const coaFile = parseXeroChartOfAccounts(fullText);
+      if (coaFile) {
+        mergeIntoCoa(coaFile.accounts, coaFile.vatDefaults);
+        item.status = 'done';
+        item.error = null;
+        renderXeroExportFileList();
+        continue;
+      }
       // A full year of transactions can easily be 100KB+ of CSV text, well
       // over the 64 KiB-total prompt cap the published page's `sample`
       // capability allows in one call — so rather than silently dropping
@@ -1747,7 +1795,19 @@ async function processXeroExportQueue() {
       const supplierAccounts = {};
       for (let i = 0; i < chunks.length; i++) {
         statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
-        const { accounts, items, adjustments: adj } = await callXeroFileExtraction(chunks[i]);
+        const reply = await callXeroFileExtraction(chunks[i]);
+        const { adjustments: adj } = reply;
+        // Accounts already known (e.g. from a chart of accounts file) keep
+        // their own codes, matched by name.
+        const knownByName = name => ACCOUNTS.find(a => !isStandardAccount(a.code) && a.name.trim().toLowerCase() === String(name || '').trim().toLowerCase());
+        const accounts = reply.accounts.map(a => { const k = knownByName(a.name); return k ? { code: k.code, name: k.name } : a; });
+        const items = reply.items.map(it => {
+          const k = knownByName(it.accountName);
+          const fixed = k ? { ...it, accountCode: k.code, accountName: k.name } : it;
+          // An export without a tax rate column: the account's default.
+          if (!VAT_RATES.includes(fixed.vatRate) && k && VAT_DEFAULTS[k.code]) fixed.vatRate = VAT_DEFAULTS[k.code];
+          return fixed;
+        });
         adj.forEach(a => {
           const description = String(a.description || '').trim();
           if (!description) return;
@@ -2799,6 +2859,13 @@ function renderUploadFileList() {
       div.appendChild(note);
     }
     // Why a file failed (or partly failed) — shown in full, not just on hover.
+    if (item.status === 'done' && item.info) {
+      const ok = document.createElement('div');
+      ok.className = 'dup-note';
+      ok.style.color = 'var(--green)';
+      ok.textContent = '✓ ' + item.info;
+      div.appendChild(ok);
+    }
     const problem = item.status === 'failed' ? item.error : (item.status === 'done' ? item.warning : null);
     if (problem) {
       const note = document.createElement('div');
@@ -3686,6 +3753,211 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
 // Returns { added, warning } — `warning` is set when some batches couldn't
 // be read, so the rows that did come through are kept and the gap is shown
 // next to the file. Throws only if nothing could be read at all.
+// ── BANK STATEMENT PDFs ─────────────────────────────────────────────────────
+// A bank's own statement PDF (e.g. Starling's monthly statement) holds real
+// text laid out in columns: Date | Type | Transaction | In | Out | Balance.
+// pdf.js reads each piece of text with its position, so every line is
+// rebuilt exactly as printed and each amount is put in the column it sits
+// under (amounts line up on their right edge) — money in or out is never
+// guessed. The lines then go through the same line-by-line reader as a CSV
+// statement, where Claude only codes them, and the totals are checked
+// against the statement's own summary.
+const PDFJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+let pdfjsLoading = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (!pdfjsLoading) {
+    pdfjsLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = PDFJS_URL;
+      s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL; resolve(window.pdfjsLib); };
+      s.onerror = () => { pdfjsLoading = null; reject(new Error('Could not load the PDF reader — check the internet connection.')); };
+      document.head.appendChild(s);
+    });
+  }
+  return pdfjsLoading;
+}
+
+// Every page as lines of text pieces { x, right, s }, top to bottom.
+async function readPdfTextLines(file) {
+  const pdfjs = await loadPdfJs();
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const pages = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const lines = [];
+    for (const it of tc.items) {
+      const s = String(it.str || '').trim();
+      // Skip empty and rotated text (e.g. a sideways watermark).
+      if (!s || Math.abs(it.transform[1]) > 0.01 || Math.abs(it.transform[2]) > 0.01) continue;
+      const x = it.transform[4], y = it.transform[5];
+      let line = lines.find(l => Math.abs(l.y - y) <= 2);
+      if (!line) { line = { y, items: [] }; lines.push(line); }
+      line.items.push({ x, right: x + (it.width || 0), s });
+    }
+    lines.sort((a, b) => b.y - a.y);
+    // Pieces of one cell printed separately are joined back together.
+    lines.forEach(l => {
+      l.items.sort((a, b) => a.x - b.x);
+      const merged = [];
+      for (const it of l.items) {
+        const prev = merged[merged.length - 1];
+        if (prev && it.x - prev.right < 2.5) { prev.s += (it.x - prev.right > 0.8 ? ' ' : '') + it.s; prev.right = Math.max(prev.right, it.right); }
+        else merged.push({ ...it });
+      }
+      l.items = merged;
+    });
+    pages.push(lines);
+  }
+  return pages;
+}
+
+const PDF_MONEY_RE = /^\(?-?£?\s?-?\d{1,3}(?:,?\d{3})*\.\d{2}\)?(?:\s?(?:CR|DR))?$/i;
+const PDF_DATE_RE = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$|^(\d{1,2})\s+([A-Za-z]{3,9})\.?(?:\s+(\d{2}|\d{4}))?$/;
+const PDF_IN_RE = /^(in|paid in|money in|credits?|receipts|deposits?)(\s*\(?£\)?)?$/i;
+const PDF_OUT_RE = /^(out|paid out|money out|debits?|payments|withdrawals?)(\s*\(?£\)?)?$/i;
+const MONTHS3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+function pdfDateToISO(text, fallbackYear) {
+  const m = String(text || '').trim().match(PDF_DATE_RE);
+  if (!m) return null;
+  let d, mo, y;
+  if (m[1]) { d = +m[1]; mo = +m[2]; y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; }
+  else {
+    d = +m[4]; mo = MONTHS3.indexOf(m[5].slice(0, 3).toLowerCase()) + 1;
+    y = m[6] ? (m[6].length === 2 ? 2000 + +m[6] : +m[6]) : fallbackYear;
+  }
+  if (!mo || !y || !validDayMonth(d, mo)) return null;
+  return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function pdfMoney(s) {
+  const t = String(s).trim();
+  const neg = /^\(.*\)$/.test(t) || /-/.test(t) || /DR$/i.test(t);
+  const n = parseFloat(t.replace(/[^0-9.]/g, ''));
+  return isNaN(n) ? NaN : (neg ? -n : n);
+}
+
+// The column headings line: a "Date" heading plus money-in and money-out
+// headings ("In"/"Out", "Paid in"/"Paid out", "Credits"/"Debits"…).
+function findPdfStatementHeader(lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const items = lines[i].items;
+    const date = items.find(it => /^date$/i.test(it.s));
+    const inn = items.find(it => PDF_IN_RE.test(it.s));
+    const out = items.find(it => PDF_OUT_RE.test(it.s));
+    if (!date || !inn || !out) continue;
+    const near = lines.filter(l => Math.abs(l.y - lines[i].y) <= 16).flatMap(l => l.items);
+    const bal = near.find(it => /^balance$/i.test(it.s)) || near.find(it => /balance/i.test(it.s));
+    const firstMoney = Math.min(inn.x, out.x);
+    const text = items.filter(it => it !== date && it.x > date.x && it.right < firstMoney - 2).map(it => ({ name: it.s, x: it.x }));
+    return {
+      index: i,
+      dateX: date.x,
+      cols: [{ key: 'in', right: inn.right }, { key: 'out', right: out.right }, ...(bal ? [{ key: 'balance', right: bal.right }] : [])],
+      text,
+      descIdx: Math.max(0, text.findIndex(t => /transaction|description|details|narrative|particulars|payee/i.test(t.name))),
+    };
+  }
+  return null;
+}
+
+// Reads a statement PDF into { stmt, info, warning }, or null if it isn't a
+// text statement with recognisable columns (e.g. a receipt or a scan).
+async function readPdfStatement(file) {
+  const pages = await readPdfTextLines(file);
+  const allText = pages.flat().map(l => l.items.map(i => i.s).join(' ')).join('\n');
+  if (!allText.trim()) return null;
+  const years = (allText.match(/\b20\d{2}\b/g) || []).map(Number);
+  const fallbackYear = years.length ? Math.max(...years) : new Date().getFullYear();
+
+  let hdr = null;
+  const rows = [];
+  for (const lines of pages) {
+    let start = 0;
+    const own = findPdfStatementHeader(lines);
+    if (own) { hdr = own; start = own.index + 1; }
+    if (!hdr) continue;
+    const textCols = hdr.text.length ? hdr.text : [{ name: 'Description', x: hdr.dateX + 40 }];
+    let prev = null;
+    for (const line of lines.slice(start)) {
+      const items = line.items;
+      const first = items[0];
+      const iso = first && first.x < hdr.dateX + 20 ? pdfDateToISO(first.s, fallbackYear) : null;
+      const money = items.filter(it => it !== first || !iso).filter(it => PDF_MONEY_RE.test(it.s) && it.x > (textCols[textCols.length - 1].x));
+      const words = items.filter(it => !(iso && it === first) && !money.includes(it));
+      const amounts = {};
+      money.forEach(it => {
+        const col = hdr.cols.reduce((best, c) => Math.abs(c.right - it.right) < Math.abs(best.right - it.right) ? c : best);
+        amounts[col.key] = pdfMoney(it.s);
+      });
+      const cells = textCols.map(() => []);
+      words.forEach(it => {
+        let k = 0;
+        textCols.forEach((c, j) => { if (it.x >= c.x - 3) k = j; });
+        cells[k].push(it.s);
+      });
+      const hasMoney = amounts.in !== undefined || amounts.out !== undefined;
+      if (iso || (hasMoney && prev && words.length && Math.abs(prev.y - line.y) < 40)) {
+        // A new transaction (an undated one takes the date above it).
+        prev = { y: line.y, date: iso || prev.date, cells: cells.map(c => c.join(' ')), in: amounts.in, out: amounts.out };
+        if (!hasMoney && !words.length) { prev = null; continue; }
+        rows.push(prev);
+      } else if (prev && !hasMoney && words.length && first.x >= textCols[0].x - 3 && prev.y - line.y < 18) {
+        // A description running onto a second line.
+        cells.forEach((c, j) => { if (c.length) prev.cells[j] = `${prev.cells[j]} ${c.join(' ')}`.trim(); });
+        prev.y = line.y;
+      } else {
+        prev = null;
+      }
+    }
+  }
+  if (!hdr || !rows.length) return null;
+  const real = rows.filter(r => r.in !== undefined || r.out !== undefined);
+  // Some banks print a payment as a negative figure in a single column.
+  const signed = r => {
+    if (r.in !== undefined && r.in < 0) return { in: undefined, out: -r.in };
+    if (r.out !== undefined && r.out < 0) return { in: -r.out, out: undefined };
+    return r;
+  };
+  const textCols = hdr.text.length ? hdr.text : [{ name: 'Description' }];
+  const header = ['Date', ...textCols.map(t => t.name.charAt(0) + t.name.slice(1).toLowerCase()), 'Paid in', 'Paid out'];
+  const records = real.map(r => { const s = signed(r); return [r.date, ...r.cells, s.in !== undefined ? s.in.toFixed(2) : '', s.out !== undefined ? s.out.toFixed(2) : '']; });
+  const n = textCols.length;
+  const stmt = {
+    header, records,
+    descCol: 1 + hdr.descIdx, descCols: [], dateCol: 0, amountCol: -1, amountIsCost: false, buCols: [],
+    inCol: n + 1, outCol: n + 2, fixedDates: true,
+  };
+
+  // Check the lines read against the statement's own totals.
+  const totalIn = records.reduce((s, r) => s + (parseFloat(r[n + 1]) || 0), 0);
+  const totalOut = records.reduce((s, r) => s + (parseFloat(r[n + 2]) || 0), 0);
+  const labelled = re => {
+    for (const l of pages.flat()) {
+      const label = l.items.findIndex(it => re.test(it.s));
+      if (label < 0) continue;
+      const amt = l.items.slice(label + 1).find(it => PDF_MONEY_RE.test(it.s));
+      if (amt) return pdfMoney(amt.s);
+    }
+    return null;
+  };
+  const stIn = labelled(/^(payments in|money in|total (money )?in|total paid in|paid in|total deposits|total credits|total receipts)$/i);
+  const stOut = labelled(/^(payments out|money out|total (money )?out|total paid out|paid out|total withdrawals|total debits|total payments)$/i);
+  const gbp = v => `£${v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const close = (a, b) => Math.abs(a - b) < 0.005;
+  let info = '', warning = '';
+  if (stIn !== null && stOut !== null) {
+    if (close(stIn, totalIn) && close(stOut, totalOut)) info = `Checked: money in ${gbp(totalIn)} and money out ${gbp(totalOut)} match the statement's totals.`;
+    else warning = `The lines read don't match the statement's totals — money in ${gbp(totalIn)} (statement ${gbp(stIn)}), money out ${gbp(totalOut)} (statement ${gbp(stOut)}). Some lines may be missing; check against the PDF.`;
+  } else {
+    info = `Money in ${gbp(totalIn)}, money out ${gbp(totalOut)} — the statement has no totals to check against.`;
+  }
+  return { stmt, info, warning };
+}
+
 // ── FREE-FORM CLIENT DOCUMENTS (.odt / .docx / .txt) ────────────────────────
 // A client's own notes or year summary — e.g. a table of monthly takings with
 // costs typed into the cells ("Fuel k2 additive £6.99 x2", "Public
@@ -3950,6 +4222,7 @@ async function processUnifiedQueue() {
     renderUploadFileList();
     statusEl.textContent = `Processing ${item.file.name} (${done+1}/${toProcess.length})…`;
     const kind = uploadFileKind(item.file);
+    let pdfStatement = null;
     try {
       if (kind === 'xlsx') {
         // A spreadsheet that's a transaction list (Date + Amount columns)
@@ -3983,10 +4256,21 @@ async function processUnifiedQueue() {
         }
       } else if (kind === 'msg') {
         item.addedCount = await parseMsgFile(item.file);
+      } else if (kind === 'pdf' && (pdfStatement = await readPdfStatement(item.file).catch(() => null))) {
+        // A bank statement PDF with real text columns — read line by line.
+        const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, pdfStatement.stmt);
+        item.addedCount = result.added;
+        item.warning = [pdfStatement.warning, result.warning].filter(Boolean).join(' ') || null;
+        item.info = pdfStatement.info || null;
+        item.retry = result.retry || null;
+        if (result.added) setExportType('bank');
       } else if (kind === 'pdf' || kind === 'image') {
         const aiRows = await callChambersExtraction(item.file, kind);
         aiRows.forEach(r => addRow(mapChambersRowToInternal(r)));
         item.addedCount = aiRows.length;
+        if (kind === 'pdf' && /statement/i.test(item.file.name)) {
+          item.warning = "Read as a bill or receipt (costs only) — its columns couldn't be read as a bank statement. If it is one, download the statement as CSV from the bank instead.";
+        }
       } else if (kind === 'doc') {
         const result = await parseDocumentFile(item.file, (msg) => { statusEl.textContent = msg; });
         item.addedCount = result.added;
