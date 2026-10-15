@@ -14,11 +14,12 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
   - the firm's expense template (.xlsx);
   - the Self Assessment template (.xlsx with Income and Expenses sheets). Every line is read as typed, dates such as `8.04` become 8 April in the sheet's "Year End" tax year, and Claude only chooses the account;
   - bank statements and transaction lists (.csv or .xlsx). These are read line by line, and the Description and amount come from the file;
+  - bank statement PDFs with text in columns (e.g. Starling's monthly statement). Each line is read exactly as printed, amounts are put in or out by their column, and the totals are checked against the statement's own summary;
   - chambers bills and receipts (PDF, PNG, JPG);
   - Outlook emails (.msg) or pasted email text;
   - a client's own notes or year summaries (.odt, .docx, .txt, or a spreadsheet list). Claude reads these, and each Description is the client's own wording, checked against the document.
 
-  Step ① takes last year's Xero Account Transactions export; one **Process everything** press reads both. It also picks out last year's business-use adjustments (e.g. "Motor expenses 60% business use", "Use of Home 1 of 4 rooms") and shows them under the client for reference.
+  Step ① takes last year's Xero Account Transactions export, plus Xero's Chart of Accounts export (.csv) if the transactions export has no account codes; one **Process everything** press reads both. It also picks out last year's business-use adjustments (e.g. "Motor expenses 60% business use", "Use of Home 1 of 4 rooms") and shows them under the client for reference.
 - **Client data**: client lists, charts of accounts, coding history and notes are saved in your browser. Use **⚙ Settings → Back up client data** now and then, because clearing browser data deletes them. **Restore from backup** brings them back, or moves them to another computer or browser.
 - **Shared client data (password-protected)**: ⚙ Settings → **Create encrypted copy** scrambles the client data in this browser with a password you choose, into `client-data.enc.json`. Upload that file to the `docs` folder here on GitHub. Any browser that then opens the site asks for the password once and loads the data. The file on GitHub is unreadable without the password, which is never stored anywhere. Use four or five random words. If the password is forgotten, the shared copy can't be opened, but each browser's own copy and your backups are unaffected. To publish changes, create a new encrypted copy and upload it over the old one.
 
