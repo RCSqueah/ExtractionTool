@@ -945,6 +945,9 @@
       ↓ Download Xero CSV
     </button>
     <span id="exportNote" style="font-size:12px;color:var(--text-faint);margin-left:4px"></span>
+    <label id="bankDescBlankLabel" style="display:none;gap:6px;align-items:center;font-size:12px;color:var(--text-muted);margin-left:8px;cursor:pointer;" title="The Payee column still shows who it was; the bank's own wording stays in the table for reference">
+      <input type="checkbox" id="bankDescBlankBox" onchange="onBankDescBlankChange(this.checked)" disabled> Leave Description blank (Payee only) — saved per client
+    </label>
   </div>
 
   <!-- SALES INVOICES (see renderSalesTable) -->
@@ -1101,6 +1104,8 @@ async function loadClientRules() {
   currentFlatRate = false;
   currentAdjustments = [];
   currentSalesExported = {};
+  currentBankDescBlank = false;
+  currentPayeeNames = {};
 
   if (name) {
     const { db } = await getCaps();
@@ -1119,6 +1124,8 @@ async function loadClientRules() {
           currentFlatRate = data.flatRate === true;
           if (Array.isArray(data.adjustments)) currentAdjustments = data.adjustments;
           if (data.salesExported && typeof data.salesExported === 'object') currentSalesExported = data.salesExported;
+          currentBankDescBlank = data.bankDescBlank === true;
+          if (data.payeeNames && typeof data.payeeNames === 'object') currentPayeeNames = data.payeeNames;
         }
       } catch (e) {
         // No history yet for this client — that's fine, starts empty.
@@ -1135,6 +1142,8 @@ async function loadClientRules() {
   if (box) box.value = currentExtraInstructions;
   const fr = document.getElementById('flatRateBox');
   if (fr) { fr.checked = currentFlatRate; fr.disabled = !currentClientKey; }
+  const bd = document.getElementById('bankDescBlankBox');
+  if (bd) { bd.checked = currentBankDescBlank; bd.disabled = !currentClientKey; }
   renderClientHistoryPanel();
   renderCoaPanel();
   renderAdjustments();
@@ -1159,6 +1168,8 @@ async function saveClientDoc() {
       flatRate: currentFlatRate,
       adjustments: currentAdjustments,
       salesExported: currentSalesExported,
+      bankDescBlank: currentBankDescBlank,
+      payeeNames: currentPayeeNames,
     });
   } catch (e) {
     console.error('Could not save client data:', e);
@@ -1177,6 +1188,22 @@ function renderAdjustments() {
   el.innerHTML = `<strong>Last year's business-use adjustments</strong> (from the Xero export — for reference, nothing is applied):` + currentAdjustments.map(a =>
     `<div>• ${esc(a.account)} — ${esc(a.description)}${money(a.amount)}</div>`).join('');
   el.style.display = 'block';
+}
+
+// Payee names typed by the accountant for a bank wording, e.g.
+// "Queah S & R (DAR DECOR BK-0345)" → "Reliable Client Solutions", used for
+// the same wording next time. Numbers in the wording (references that
+// change each month) are ignored when matching.
+let currentPayeeNames = {};
+function payeeNameKey(desc) {
+  return String(desc || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
+}
+
+// Bank Statement CSV for this client: Payee only, Description left blank.
+let currentBankDescBlank = false;
+function onBankDescBlankChange(on) {
+  currentBankDescBlank = !!on;
+  scheduleSaveClientDoc();
 }
 
 let clientDocSaveTimer = null;
@@ -1332,6 +1359,10 @@ function recordClientRule(supplier, desc, acc, vat, note, opts = {}) {
   const keepNote = note || (existing && existing.note) || '';
   const rule = keepNote ? { acc, vat, note: keepNote } : { acc, vat };
   if (opts.user) { rule.user = true; if (opts.dir) rule.dir = opts.dir; }
+  // The payee's name as written (e.g. "B & Q"), so the same name is used
+  // for this supplier every time.
+  const name = String(supplier || '').trim();
+  if (key.startsWith('supplier:') && name) rule.name = (existing && existing.name && !opts.user) ? existing.name : name;
   if (existing && JSON.stringify(existing) === JSON.stringify(rule)) return; // no change
   currentClientRules[key] = rule;
   scheduleSaveClientDoc();
@@ -1352,12 +1383,30 @@ function recordUserCorrection(row) {
 // bank's exact wording), then the supplier — only for the same direction.
 function lookupUserRule(supplier, desc, direction) {
   if (!currentClientKey) return null;
-  const keys = [ruleKeyFor('', desc), ruleKeyFor(supplier, '')].filter(Boolean);
+  const keys = [ruleKeyFor('', desc), supplierRuleKey(supplier)].filter(Boolean);
   for (const k of keys) {
     const r = currentClientRules[k];
     if (r && r.user && r.acc && (!r.dir || r.dir === direction)) return r;
   }
   return null;
+}
+
+// The coding-history key for a supplier, matching names that differ only in
+// spacing, case or punctuation ("B&Q" / "B & Q", "SAINSBURY'S" / "Sainsburys").
+const alnum = t => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function supplierRuleKey(supplier) {
+  const exact = ruleKeyFor(supplier, '');
+  if (!exact || currentClientRules[exact]) return exact;
+  const want = alnum(supplier);
+  if (!want) return exact;
+  return Object.keys(currentClientRules).find(k => k.startsWith('supplier:') && alnum(k.slice(9)) === want) || exact;
+}
+
+// The name this client's books already use for a payee, if any.
+function knownPayeeName(payee) {
+  const k = supplierRuleKey(payee);
+  const r = k && currentClientRules[k];
+  return r && r.name ? r.name : null;
 }
 
 // Compares an explicitly-stated acc/VAT (from a file or AI extraction) against
@@ -1665,6 +1714,49 @@ function parseXeroChartOfAccounts(text) {
 // the same invoice isn't imported again from the client's emails.
 // Returns { numbers: Map(key → date), invoiceList: true if that's all the
 // file is }.
+// A bank statement CSV already coded for Xero (Date, Amount, Payee,
+// Description, Reference, Account Code, Tax Rate — e.g. a previous quarter's
+// finished file). Each payee coded to one account becomes a firm rule, as
+// if the accountant had coded it in this tool; a payee coded to different
+// accounts is left for Claude and the accountant. Returns null if the text
+// isn't one, else { learned, mixed, lines }.
+function learnFromCodedBankCsv(text) {
+  const rows = parseCsvText(text);
+  const norm = c => String(c || '').replace(/[*\s]/g, '').toLowerCase();
+  const h = rows.findIndex(r => { const n = r.map(norm); return n.includes('payee') && n.includes('accountcode') && n.includes('amount') && n.includes('date'); });
+  if (h < 0) return null;
+  const head = rows[h].map(norm);
+  const c = n => head.indexOf(n);
+  const payeeCol = c('payee'), amtCol = c('amount'), accCol = c('accountcode'), taxCol = c('taxrate');
+  const byPayee = new Map();
+  let lines = 0;
+  rows.slice(h + 1).forEach(r => {
+    const payee = String(r[payeeCol] || '').trim();
+    const code = String(r[accCol] || '').trim();
+    const amt = parseAmount(r[amtCol]);
+    if (!payee || !code || isNaN(amt)) return;
+    lines++;
+    const key = alnum(payee);
+    if (!byPayee.has(key)) byPayee.set(key, { name: payee, codes: new Set(), dirs: new Set(), vat: new Set() });
+    const e = byPayee.get(key);
+    e.codes.add(code); e.dirs.add(amt < 0 ? 'out' : 'in');
+    const v = String(r[taxCol] || '').trim();
+    if (VAT_RATES.includes(v)) e.vat.add(v);
+  });
+  let learned = 0;
+  const mixed = [];
+  byPayee.forEach(e => {
+    if (e.codes.size !== 1) { mixed.push(e.name); return; }
+    const code = [...e.codes][0];
+    const acct = ACCOUNTS.find(a => a.code === code);
+    if (!acct) return;
+    const vat = e.vat.size === 1 ? [...e.vat][0] : (VAT_DEFAULTS[code] || 'No VAT');
+    recordClientRule(e.name, '', `${acct.code} - ${acct.name}`, vat, '', { user: true, dir: e.dirs.size === 1 ? [...e.dirs][0] : undefined });
+    learned++;
+  });
+  return { learned, mixed, lines };
+}
+
 function salesInvoiceNumbersFromXeroText(text) {
   const rows = parseCsvText(text);
   const numbers = new Map();
@@ -1850,6 +1942,7 @@ async function processXeroExportQueue() {
   const isCoa = item => !!(item.text && parseXeroChartOfAccounts(item.text));
   toProcess.sort((a, b) => (isCoa(b) ? 1 : 0) - (isCoa(a) ? 1 : 0));
   let totalAccounts = 0, totalRules = 0, totalInvoicesInXero = 0;
+  const codedNotes = [];
   const adjustments = [];
   let anyRead = false;
 
@@ -1860,6 +1953,16 @@ async function processXeroExportQueue() {
     try {
       if (item.readError) throw item.readError;
       const fullText = item.text;
+      const coded = learnFromCodedBankCsv(fullText);
+      if (coded) {
+        totalRules += coded.learned;
+        item.status = 'done';
+        item.error = null;
+        codedNotes.push(`${item.file.name}: ${coded.learned} payee${coded.learned !== 1 ? 's' : ''} learned as your own coding (✎ yours)` +
+          (coded.mixed.length ? `; ${coded.mixed.length} coded to more than one account left for Claude and you (${coded.mixed.slice(0, 5).join(', ')}${coded.mixed.length > 5 ? ', …' : ''})` : '') + '.');
+        renderXeroExportFileList();
+        continue;
+      }
       const inXero = salesInvoiceNumbersFromXeroText(fullText);
       inXero.numbers.forEach((d, key) => { if (!currentSalesExported[key]) currentSalesExported[key] = 'xero'; });
       totalInvoicesInXero += inXero.numbers.size;
@@ -1963,7 +2066,7 @@ async function processXeroExportQueue() {
   renderClientHistoryPanel();
   const failed = toProcess.filter(q => q.status === 'error' && !String(q.error||'').includes('very large')).length;
   totalAccounts = ACCOUNTS.length;
-  statusEl.textContent = `✓ Processed ${toProcess.length}/${toProcess.length} file${toProcess.length!==1?'s':''} — chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}, ${totalRules} coding rule${totalRules!==1?'s':''} learned from this batch${totalInvoicesInXero ? `, ${totalInvoicesInXero} sales invoice number${totalInvoicesInXero !== 1 ? 's' : ''} already in Xero noted` : ''}.`;
+  statusEl.textContent = `✓ Processed ${toProcess.length}/${toProcess.length} file${toProcess.length!==1?'s':''} — chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}, ${totalRules} coding rule${totalRules!==1?'s':''} learned from this batch${totalInvoicesInXero ? `, ${totalInvoicesInXero} sales invoice number${totalInvoicesInXero !== 1 ? 's' : ''} already in Xero noted` : ''}.${codedNotes.length ? ' ' + codedNotes.join(' ') : ''}`;
   // Drop the successfully-processed files from the queue so re-running
   // "Process" only touches ones that failed or were added since.
   xeroExportQueue = xeroExportQueue.filter(q => q.status !== 'done');
@@ -3038,7 +3141,7 @@ function buildCodingHistoryText() {
   if (!keys.length) return '';
   const lines = keys.map(k => {
     const r = rules[k];
-    const what = k.startsWith('supplier:') ? `Supplier "${k.slice(9)}"` : `"${k.slice(5)}"`;
+    const what = k.startsWith('supplier:') ? `Supplier "${r.name || k.slice(9)}"` : `"${k.slice(5)}"`;
     return `- ${what} → ${r.acc} (${r.vat})${r.note ? ` — ${r.note}` : ''}${r.user ? " — the accountant's own correction, always follow it" : ''}`;
   });
   return `\n\nTHIS CLIENT'S USUAL CODING (from their past bookkeeping — follow it for the same supplier or kind of cost):\n${lines.join('\n')}`;
@@ -3717,12 +3820,12 @@ function buildBankStatementExtractionSystemPrompt() {
 
 Extract EVERY transaction line as its own row — do not skip or merge any, and do not filter anything out yourself.
 
-CHART OF ACCOUNTS (choose the single best-fit code only if you are confident — for money out the expense category, for money in the income account such as Revenue for customer receipts; use the exact code shown; leave accountCode null if unsure or if the chart is empty). Use the Section heading as a strong hint (e.g. "Van Expenses" and "Car Expenses" are motor expenses):
+CHART OF ACCOUNTS (choose the single best-fit code only if you are confident — for money out the expense category, for money in the income account such as Revenue for customer receipts — but a refund from a supplier (e.g. money back from a shop the client buys from) goes to the same cost account as the purchases, not to Revenue; use the exact code shown; leave accountCode null if unsure or if the chart is empty). Use the Section heading as a strong hint (e.g. "Van Expenses" and "Car Expenses" are motor expenses):
 ${coaText}
 
 For each transaction:
 - "date" in YYYY-MM-DD format.
-- "payee" — the cleaned-up merchant/counterparty name (strip card masks, transaction reference numbers, and boilerplate like "VIA MOBILE - PYMT" or "FP dd/mm/yy" down to the actual person/company), or null if genuinely just a bank charge/fee with no counterparty.
+- "payee" — the cleaned-up merchant/counterparty name (strip card masks, transaction reference numbers, branch names/numbers, and boilerplate like "VIA MOBILE - PYMT" or "FP dd/mm/yy" down to the actual person/company, e.g. "Wickes" for "WICKES GUILDFORD", "B & Q" for "B & Q 1029"), or null if genuinely just a bank charge/fee with no counterparty. When the payee is one of the suppliers in this client's usual coding below, use exactly that name.
 - "description" — a short, cleaned description of what the transaction actually was, in plain English (e.g. "Card payment — Vodafone mobile bill", "Direct debit — Barclaycard", "Bank charges"). When the line is under a Section heading, say what it was for using that heading — e.g. "Car fuel" under "Car Expenses", "Van tyres" under "Van Expenses".
 - "amount" — the transaction amount as a positive number (no currency symbols, no commas, no sign).
 - "direction" — "out" if money left the account (a debit/payment), "in" if money was received (a credit/deposit).
@@ -3861,7 +3964,8 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
     vat: vat,
     ref: opts.fileRef || '',
     date: (opts.fixedDate ? opts.fileDate : t.date) || '',
-    supplier: (opts.filePayee !== undefined ? opts.filePayee : t.payee) || '',
+    // A payee the client's books already know is written the same way.
+    supplier: (opts.filePayee !== undefined ? opts.filePayee : (currentPayeeNames[payeeNameKey(original)] || knownPayeeName(t.payee) || t.payee)) || '',
     desc: desc,
     notes: joinNotes(notes),
     gross: (amount === null || amount === undefined || isNaN(Number(amount))) ? '' : Math.abs(Number(amount)),
@@ -4952,7 +5056,15 @@ function addRow(data) {
 
   // The accountant's own earlier correction for this line wins over what
   // came in (Claude's choice or the file's), and says so in Notes.
-  const mine = lookupUserRule(d.supplier, d.desc, d.direction === 'in' ? 'in' : 'out');
+  let mine = lookupUserRule(d.supplier, d.desc, d.direction === 'in' ? 'in' : 'out');
+  // Money in from a supplier you've coded as a cost is most likely a refund:
+  // the same account as its purchases (a payment for a sales invoice is
+  // still matched to the invoice afterwards — see matchSalesReceipts).
+  let refund = false;
+  if (!mine && d.direction === 'in') {
+    const out = lookupUserRule(d.supplier, d.desc, 'out');
+    if (out && !/revenue|sales|income|turnover/i.test(out.acc)) { mine = out; refund = true; }
+  }
   if (mine) {
     const before = acc;
     if (mine.acc !== acc || (!vatOverride && mine.vat && mine.vat !== vat)) {
@@ -4960,7 +5072,8 @@ function addRow(data) {
       if (!vatOverride && mine.vat) vat = mine.vat;
       // A "usually coded to…" check no longer applies.
       notes = joinNotes(notes.split(' · ').filter(n => !/^Check: this client/.test(n)));
-      notes = joinNotes([before && before !== acc ? `Coded as you corrected before (was: ${before})` : 'Coded as you corrected before', notes]);
+      const how = refund ? `Money in from ${d.supplier || 'a supplier you pay'} — looks like a refund, coded to the same account as its purchases; check` : "Coded as you've coded it before";
+      notes = joinNotes([before && before !== acc ? `${how} (was: ${before})` : how, notes]);
     }
   } else if (!acc) {
     // Nothing came in coded (no account) — check this client's history
@@ -5230,6 +5343,18 @@ function setField(id, field, val) {
   const row = rows.find(r => r.id === id);
   if (!row) return;
   row[field] = val;
+  if (field === 'supplier' && row.fromBank && row.desc && val.trim()) {
+    // Remember the payee name for this bank wording, and use it on the
+    // other lines with the same wording now.
+    currentPayeeNames[payeeNameKey(row.desc)] = val.trim();
+    scheduleSaveClientDoc();
+    rows.forEach(r => {
+      if (r === row || !r.fromBank || payeeNameKey(r.desc) !== payeeNameKey(row.desc)) return;
+      r.supplier = val.trim();
+      const tr = document.getElementById('tr_' + r.id);
+      if (tr) { tr.innerHTML = buildRowHTML(r); tr.classList.toggle('needs-attention', rowNeedsAttention(r)); }
+    });
+  }
   if (field === 'supplier') {
     const override = supplierVatOverride(val);
     if (override && override !== row.vat) {
@@ -5766,6 +5891,8 @@ function setExportType(type) {
   document.getElementById('btnExportBank').classList.toggle('active', type==='bank');
   const btn = document.getElementById('exportBtn');
   btn.innerHTML = type==='bills' ? '↓ Download Xero CSV (Bills)' : '↓ Download Xero CSV (Bank Statement)';
+  const bd = document.getElementById('bankDescBlankLabel');
+  if (bd) bd.style.display = type === 'bank' ? 'inline-flex' : 'none';
   refreshExportBtn();
 }
 
@@ -5898,10 +6025,14 @@ function buildBankCSVData() {
     const desc   = descEl?.value || r.desc;
     const sup    = supEl?.value  || r.supplier || client;
     const dateStr= fmtDate(dateEl?.value || r.date);
-    const ref    = refEl?.value || r.ref || `${prefix}-${seq}`;
+    // Bank lines carry only a real reference (e.g. a sales invoice number
+    // for a payment), not a made-up one.
+    const ref    = refEl?.value || r.ref || '';
 
-    // Build description with BU annotation
-    let descOut = desc;
+    // Build description with BU annotation. Some clients' bank lines go to
+    // Xero with the Payee only and the Description left blank.
+    const base   = currentBankDescBlank ? '' : desc;
+    let descOut = base;
     if (isHome213(accFull)) {
       if (homeAdjustmentApplies(vat)) {
         descOut += ` @ ${getHomePct().toFixed(2)}% business use (home)`;
@@ -5923,10 +6054,10 @@ function buildBankCSVData() {
     // convention.
     const sign = r.direction === 'in' ? 1 : -1;
     const split = exportSplit(gross, bu, r.home, accFull, vat);
-    const bankLine = (d, amt, code, tax) => [dateStr, (sign * Math.abs(amt)).toFixed(2), csvEsc(sup), csvEsc(d), csvEsc(ref), code, csvEsc(tax)].join(',');
+    const bankLine = (d, amt, code, tax) => [dateStr, (sign * Math.abs(amt)).toFixed(2), csvEsc(sup), csvEsc(String(d).trim()), csvEsc(ref), code, csvEsc(tax)].join(',');
     lines.push(bankLine(descOut, split.personal > 0 ? split.business : net, accCode, vat));
     if (split.personal > 0) {
-      lines.push(bankLine(`${desc} @ ${personalPctLabel(split)}% personal use`, split.personal, PERSONAL_USE_ACCOUNT, 'No VAT'));
+      lines.push(bankLine(`${base} @ ${personalPctLabel(split)}% personal use`, split.personal, PERSONAL_USE_ACCOUNT, 'No VAT'));
     }
     seq++;
   });
