@@ -1691,6 +1691,139 @@ async function extractTextFromXeroExport(file) {
 // ~2 KB instruction block rather than right up against the limit.
 const XERO_EXPORT_TEXT_LIMIT = 55000; // enough for a year of transactions on most clients
 
+// ── XERO ACCOUNT TRANSACTIONS, READ DIRECTLY ────────────────────────────────
+// Xero's Account Transactions report has a fixed layout: a heading row per
+// account, then its lines (Date, Source, Contact, Description, …, Gross,
+// VAT Rate Name, Account Code, Account Type). Reading it here takes a
+// moment and needs no Claude call:
+//  - the chart of accounts: each profit-and-loss account used, with the VAT
+//    rate it's most often coded at (an export without codes is matched to
+//    the client's chart by account name);
+//  - coding history: each supplier/customer and the account its spending
+//    or money received goes to (one used for several kinds of cost — the
+//    client's own initials, a cash clearing account — is remembered by
+//    description instead); for accounts kept only as year-end journals,
+//    one entry per kind of cost;
+//  - last year's business-use adjustments: journals reducing a cost account
+//    (e.g. "Use of Home adjustments - 1 of 3 rooms").
+// Returns null if the text isn't such a report.
+function xeroDateValue(t) {
+  const s = String(t || '').trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) return new Date(+(m[3].length === 2 ? '20' + m[3] : m[3]), +m[2] - 1, +m[1]).getTime();
+  const v = Date.parse(s);
+  return isNaN(v) ? 0 : v;
+}
+
+function readXeroAccountTransactions(text) {
+  const rows = parseCsvText(text);
+  const norm = c => String(c || '').replace(/[*\s]/g, '').toLowerCase();
+  const h = rows.findIndex(r => { const n = r.map(norm); return n.includes('date') && n.includes('source') && (n.includes('gross') || n.includes('debit')); });
+  if (h < 0) return null;
+  const head = rows[h].map(norm);
+  const c = n => head.indexOf(n);
+  const col = {
+    date: c('date'), source: c('source'), contact: c('contact'), desc: c('description'),
+    gross: c('gross'), debit: c('debit'), credit: c('credit'), code: c('accountcode'), type: c('accounttype'),
+    vat: head.findIndex(x => x === 'vatratename' || x === 'taxratename'),
+  };
+  const plType = /^(expense|expenses|revenue|directcosts|overhead|overheads|sales|otherincome|depreciation)$/;
+  const known = name => ACCOUNTS.find(a => !isStandardAccount(a.code) && a.name.trim().toLowerCase() === String(name || '').trim().toLowerCase());
+  const tx = [];
+  let heading = null;
+  for (const r of rows.slice(h + 1)) {
+    const cells = r.map(x => String(x ?? '').trim());
+    const filled = cells.filter(Boolean);
+    if (!filled.length) continue;
+    if (cells[0] && filled.length === 1) { heading = /^total\b/i.test(cells[0]) ? null : cells[0]; continue; }
+    if (!heading || /^total\b/i.test(cells[0])) continue;
+    const source = col.source >= 0 ? cells[col.source] : '';
+    if (!source) continue;
+    const type = col.type >= 0 ? norm(cells[col.type]) : '';
+    let code = col.code >= 0 ? cells[col.code] : '';
+    let name = heading;
+    const k = known(heading);
+    if (!code) { if (!k) continue; code = k.code; name = k.name; }
+    // Profit and loss accounts only — not the bank, VAT or balance sheet.
+    if (type ? !plType.test(type) : !(k || (/^\d+$/.test(code) && Number(code) < 600))) continue;
+    if (/flat rate adjustment/i.test(name)) continue;
+    const gross = col.gross >= 0 ? parseAmount(cells[col.gross]) : (parseAmount(cells[col.debit]) || 0) - (parseAmount(cells[col.credit]) || 0);
+    tx.push({
+      name, code, type, source,
+      contact: col.contact >= 0 ? cells[col.contact].replace(/\s+/g, ' ') : '',
+      desc: col.desc >= 0 ? cells[col.desc].replace(/\s+/g, ' ').trim() : '',
+      gross, vat: col.vat >= 0 ? cells[col.vat] : '', date: xeroDateValue(cells[col.date]),
+    });
+  }
+  if (!tx.length) return null;
+
+  // Chart of accounts and each account's usual VAT rate.
+  const accounts = [], vatCount = {};
+  tx.forEach(t => {
+    if (!accounts.some(a => a.code === t.code)) accounts.push({ code: t.code, name: t.name });
+    if (VAT_RATES.includes(t.vat)) { vatCount[t.code] ||= {}; vatCount[t.code][t.vat] = (vatCount[t.code][t.vat] || 0) + 1; }
+  });
+  const vatDefaults = {};
+  Object.entries(vatCount).forEach(([code, counts]) => { vatDefaults[code] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]; });
+  const vatFor = t => VAT_RATES.includes(t.vat) ? t.vat : (vatDefaults[t.code] || VAT_DEFAULTS[t.code] || '');
+  const accFull = t => `${t.code} - ${t.name}`;
+
+  // Business-use adjustments: journals reducing a cost account (not a
+  // reclassification that moves the same amount to another account).
+  const journals = tx.filter(t => /manual journal/i.test(t.source));
+  const isIncome = t => /revenue|sales|income|turnover/.test(t.type) || /revenue|sales|income|turnover/i.test(t.name);
+  const stripDup = d => { const p = d.split(' - '); return p.length > 1 && p.slice(1).join(' - ').toLowerCase().startsWith(p[0].toLowerCase()) ? p.slice(1).join(' - ') : d; };
+  const adjustments = journals
+    .filter(t => !isIncome(t) && t.gross < 0 && !/WDA|WDV|capital allowance|VAT|flat rate/i.test(t.desc)
+      && !journals.some(o => o !== t && o.desc === t.desc && Math.abs(o.gross + t.gross) < 0.005))
+    .map(t => ({ account: t.name, description: stripDup(t.desc), amount: Math.round(t.gross * 100) / 100 }));
+
+  // Coding history from ordinary transactions.
+  const rules = [];
+  const ordinary = tx.filter(t => !/manual journal/i.test(t.source)).sort((a, b) => a.date - b.date);
+  const split = t => {
+    if (t.contact) return { contact: t.contact, own: t.desc.toLowerCase().startsWith(t.contact.toLowerCase() + ' - ') ? t.desc.slice(t.contact.length + 3).trim() : t.desc };
+    const i = t.desc.indexOf(' - ');
+    return i > 0 ? { contact: t.desc.slice(0, i).trim(), own: t.desc.slice(i + 3).trim() } : { contact: t.desc, own: t.desc };
+  };
+  const codesBy = {};
+  ordinary.forEach(t => { const s = split(t).contact.toLowerCase(); if (s) (codesBy[s] ||= new Set()).add(t.code); });
+  const mixedSuppliers = Object.keys(codesBy).filter(s => codesBy[s].size > 1);
+  const groups = new Set();
+  ordinary.forEach(t => {
+    const { contact, own } = split(t);
+    const vat = vatFor(t);
+    if (!vat) return;
+    const s = contact.toLowerCase();
+    if (s && codesBy[s].size === 1 && !isBookkeepingEntry(s)) {
+      rules.push({ supplier: contact, desc: own, acc: accFull(t), vat, note: (own || '').slice(0, 80) });
+    } else {
+      if (!own || isBookkeepingEntry(own)) return;
+      const g = own.toLowerCase().replace(/\d+(\.\d+)?/g, '#') + '|' + t.code;
+      if (groups.has(g)) return;
+      groups.add(g);
+      rules.push({ supplier: '', desc: own, acc: accFull(t), vat, note: own.slice(0, 80) });
+    }
+  });
+  // Accounts kept only as year-end journals: one entry per kind of cost.
+  const used = new Set(ordinary.map(t => t.code));
+  const seenKinds = new Set();
+  journals.forEach(t => {
+    if (used.has(t.code) || t.gross < 0 || /WDA|WDV|capital allowance|balancing|VAT return|flat rate/i.test(t.desc)) return;
+    let kind = t.desc.includes(' - ') ? t.desc.slice(t.desc.indexOf(' - ') + 3).trim() : t.desc;
+    if (/^(january|february|march|maech|april|may|june|july|august|september|october|november|december)$/i.test(kind)) kind = t.name;
+    kind = kind.replace(/\s*[£(].*$/, '').trim() || t.name;
+    const vat = vatFor(t);
+    if (!vat || seenKinds.has(kind.toLowerCase())) return;
+    seenKinds.add(kind.toLowerCase());
+    rules.push({ supplier: '', desc: kind, acc: accFull(t), vat, note: kind.slice(0, 80) });
+  });
+  // One rule per supplier / description: the most recent coding wins.
+  const unique = new Map();
+  rules.forEach(r => { const k = ruleKeyFor(r.supplier, r.desc); if (k) unique.set(k, r); });
+  return { accounts, vatDefaults, rules: [...unique.values()], adjustments, mixedSuppliers, lines: tx.length };
+}
+
 // Xero's own Chart of Accounts export (Accounting → Chart of accounts →
 // Export): "*Code, Report Code, *Name, …, *Type, *Tax Code, …". Read
 // directly — no need to ask Claude. Only the accounts used to code costs
@@ -1988,6 +2121,22 @@ async function processXeroExportQueue() {
         renderXeroExportFileList();
         continue;
       }
+      // Xero's Account Transactions report: read directly, no Claude call.
+      const direct = readXeroAccountTransactions(fullText);
+      if (direct) {
+        mergeIntoCoa(direct.accounts, direct.vatDefaults);
+        direct.mixedSuppliers.forEach(sup => { if (!(currentClientRules['supplier:' + sup] || {}).user) delete currentClientRules['supplier:' + sup]; });
+        direct.rules.forEach(r => recordClientRule(r.supplier, r.desc, r.acc, r.vat, r.note));
+        direct.adjustments.forEach(a => {
+          if (!adjustments.some(x => x.account.toLowerCase() === a.account.toLowerCase() && x.description.toLowerCase() === a.description.toLowerCase())) adjustments.push(a);
+        });
+        totalRules += direct.rules.length;
+        anyRead = true;
+        item.status = 'done';
+        item.error = null;
+        renderXeroExportFileList();
+        continue;
+      }
       // A full year of transactions can easily be 100KB+ of CSV text, well
       // over the 64 KiB-total prompt cap the published page's `sample`
       // capability allows in one call — so rather than silently dropping
@@ -2008,9 +2157,22 @@ async function processXeroExportQueue() {
       // cash clearing account) → those rules are kept by description, so
       // "MT - Michael's work" and "MT - water" don't overwrite each other.
       const supplierAccounts = {};
+      // Parts are read two at a time, then used in order.
+      const replies = new Array(chunks.length);
+      let nextPart = 0, partsDone = 0;
+      const showParts = () => { statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (${partsDone} of ${chunks.length} parts done)` : ''}…`; };
+      showParts();
+      const errors = [];
+      await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => {
+        while (nextPart < chunks.length) {
+          const i = nextPart++;
+          try { replies[i] = await callXeroFileExtraction(chunks[i]); } catch (e) { errors.push(e); }
+          partsDone++; showParts();
+        }
+      }));
+      if (errors.length) throw errors[0];
       for (let i = 0; i < chunks.length; i++) {
-        statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
-        const reply = await callXeroFileExtraction(chunks[i]);
+        const reply = replies[i];
         const { adjustments: adj } = reply;
         // Accounts already known (e.g. from a chart of accounts file) keep
         // their own codes, matched by name.
