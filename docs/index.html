@@ -1658,6 +1658,34 @@ function parseXeroChartOfAccounts(text) {
   return accounts.length ? { accounts, vatDefaults } : null;
 }
 
+// Sales invoice numbers already in Xero, from either an Account
+// Transactions export ("Receivable Invoice" lines, numbered in Invoice
+// Number or Reference) or Xero's own invoice list export (Business →
+// Invoices → Export: ContactName, InvoiceNumber, …). Read directly, so
+// the same invoice isn't imported again from the client's emails.
+// Returns { numbers: Map(key → date), invoiceList: true if that's all the
+// file is }.
+function salesInvoiceNumbersFromXeroText(text) {
+  const rows = parseCsvText(text);
+  const numbers = new Map();
+  const norm = c => String(c || '').replace(/[*\s]/g, '').toLowerCase();
+  const h = rows.findIndex(r => r.some(c => norm(c) === 'invoicenumber') || (r.some(c => norm(c) === 'source') && r.some(c => norm(c) === 'reference')));
+  if (h < 0) return { numbers, invoiceList: false };
+  const head = rows[h].map(norm);
+  const col = n => head.indexOf(n);
+  const src = col('source'), num = col('invoicenumber'), ref = col('reference');
+  const date = head.findIndex(x => x === 'date' || x === 'invoicedate');
+  const invoiceList = src < 0 && num >= 0 && col('contactname') >= 0;
+  rows.slice(h + 1).forEach(r => {
+    if (src >= 0 && !/receivable invoice|sales invoice|accrec/i.test(String(r[src] || ''))) return;
+    if (src < 0 && !invoiceList) return;
+    const n = String((num >= 0 && r[num]) || (ref >= 0 && r[ref]) || '').trim();
+    const key = invoiceKey(n);
+    if (key && /\d/.test(key) && !numbers.has(key)) numbers.set(key, date >= 0 ? String(r[date] || '') : '');
+  });
+  return { numbers, invoiceList };
+}
+
 function buildXeroFileExtractionSystemPrompt() {
   const known = ACCOUNTS.filter(a => !isStandardAccount(a.code));
   const knownText = known.length ? `
@@ -1821,7 +1849,7 @@ async function processXeroExportQueue() {
   }
   const isCoa = item => !!(item.text && parseXeroChartOfAccounts(item.text));
   toProcess.sort((a, b) => (isCoa(b) ? 1 : 0) - (isCoa(a) ? 1 : 0));
-  let totalAccounts = 0, totalRules = 0;
+  let totalAccounts = 0, totalRules = 0, totalInvoicesInXero = 0;
   const adjustments = [];
   let anyRead = false;
 
@@ -1832,6 +1860,16 @@ async function processXeroExportQueue() {
     try {
       if (item.readError) throw item.readError;
       const fullText = item.text;
+      const inXero = salesInvoiceNumbersFromXeroText(fullText);
+      inXero.numbers.forEach((d, key) => { if (!currentSalesExported[key]) currentSalesExported[key] = 'xero'; });
+      totalInvoicesInXero += inXero.numbers.size;
+      if (inXero.invoiceList) {
+        scheduleSaveClientDoc();
+        item.status = 'done';
+        item.error = null;
+        renderXeroExportFileList();
+        continue;
+      }
       const coaFile = parseXeroChartOfAccounts(fullText);
       if (coaFile) {
         mergeIntoCoa(coaFile.accounts, coaFile.vatDefaults);
@@ -1925,7 +1963,7 @@ async function processXeroExportQueue() {
   renderClientHistoryPanel();
   const failed = toProcess.filter(q => q.status === 'error' && !String(q.error||'').includes('very large')).length;
   totalAccounts = ACCOUNTS.length;
-  statusEl.textContent = `✓ Processed ${toProcess.length}/${toProcess.length} file${toProcess.length!==1?'s':''} — chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}, ${totalRules} coding rule${totalRules!==1?'s':''} learned from this batch.`;
+  statusEl.textContent = `✓ Processed ${toProcess.length}/${toProcess.length} file${toProcess.length!==1?'s':''} — chart of accounts now has ${ACCOUNTS.length} account${ACCOUNTS.length!==1?'s':''}, ${totalRules} coding rule${totalRules!==1?'s':''} learned from this batch${totalInvoicesInXero ? `, ${totalInvoicesInXero} sales invoice number${totalInvoicesInXero !== 1 ? 's' : ''} already in Xero noted` : ''}.`;
   // Drop the successfully-processed files from the queue so re-running
   // "Process" only touches ones that failed or were added since.
   xeroExportQueue = xeroExportQueue.filter(q => q.status !== 'done');
@@ -4266,8 +4304,15 @@ function buildSalesInvoice(inv, sourceText, sourceLabel) {
   const taxName = rate === 0.2 ? '20% (VAT on Income)' : rate === 0.05 ? '5% (VAT on Income)' : 'No VAT';
   const claudeAcc = inv.accountCode ? ACCOUNTS.find(a => a.code === String(inv.accountCode)) : null;
   const acc = claudeAcc ? `${claudeAcc.code} - ${claudeAcc.name}` : defaultIncomeAccount();
+  // One line of text per item, as in the client's Xero: "Door - Supply and
+  // fit internal door and hinges, fitting existent latch and handles".
+  const itemText = l => {
+    const title = String(l.title || '').trim();
+    const details = String(l.details || '').split('\n').map(x => x.trim().replace(/[.,;:]+$/, '').trim()).filter(Boolean).join(', ');
+    return [title, details].filter(Boolean).join(' - ');
+  };
   const outLines = lines.map(l => ({
-    desc: [String(l.title || '').trim(), String(l.details || '').trim()].filter(Boolean).join('\n'),
+    desc: itemText(l),
     amount: round2(l.amount), acc, vat: taxName,
   }));
   if (discount) outLines.push({ desc: 'Discount', amount: -discount, acc, vat: taxName });
@@ -4323,7 +4368,7 @@ async function parseSalesInvoicesText(text, sourceLabel, onProgress) {
     const before = currentSalesExported[key];
     if (before) {
       entry.include = false;
-      entry.notes.unshift(`Already exported to Xero on ${fmtDate(before)} — left out`);
+      entry.notes.unshift(before === 'xero' ? 'Already in Xero (in the Xero export from Step ①) — left out' : `Already exported to Xero on ${fmtDate(before)} — left out`);
       exportedBefore.push(inv.invoiceNumber);
     }
     salesInvoices.push(entry);
@@ -4335,8 +4380,8 @@ async function parseSalesInvoicesText(text, sourceLabel, onProgress) {
   renderSalesTable();
   const notes = [];
   if (repeated.length) notes.push(`${repeated.length} invoice${repeated.length !== 1 ? 's were' : ' was'} already read (${repeated.slice(0, 6).join(', ')}${repeated.length > 6 ? ', …' : ''}) — not added twice.`);
-  if (exportedBefore.length) notes.push(`${exportedBefore.length} already exported to Xero before — left out (${exportedBefore.slice(0, 6).join(', ')}).`);
-  const flagged = fresh.filter(s => !/^Already exported/.test(s.notes[0] || '') && s.notes.some(n => /check|left out|worked out/i.test(n))).length;
+  if (exportedBefore.length) notes.push(`${exportedBefore.length} already in Xero — left out (${exportedBefore.slice(0, 6).join(', ')}${exportedBefore.length > 6 ? ', …' : ''}).`);
+  const flagged = fresh.filter(s => !/^Already (exported|in Xero)/.test(s.notes[0] || '') && s.notes.some(n => /check|left out|worked out/i.test(n))).length;
   return {
     added: added + purchases,
     info: added || purchases
@@ -4441,11 +4486,11 @@ function setSalesLine(id, i, field, value) {
 function buildSalesCSVData() {
   // Xero Sales Invoices import (Business → Invoices → Import). Amounts are
   // before VAT: choose "Tax exclusive" when importing.
-  const headers = ['*ContactName', '*InvoiceNumber', '*InvoiceDate', '*DueDate', '*Description', '*Quantity', '*UnitAmount', '*AccountCode', '*TaxType', 'TaxAmount'];
+  const headers = ['*ContactName', '*InvoiceNumber', 'Reference', '*InvoiceDate', '*DueDate', '*Description', '*Quantity', '*UnitAmount', '*AccountCode', '*TaxType', 'TaxAmount'];
   const lines = [headers.join(',')];
   salesInvoices.filter(s => s.include).forEach(inv => {
     inv.lines.forEach(l => {
-      lines.push([csvEsc(inv.customer), csvEsc(inv.number), fmtDate(inv.date), fmtDate(inv.date), csvEsc(l.desc), '1', l.amount.toFixed(2),
+      lines.push([csvEsc(inv.customer), csvEsc(inv.number), csvEsc(inv.number), fmtDate(inv.date), fmtDate(inv.date), csvEsc(l.desc), '1', l.amount.toFixed(2),
         (l.acc || '').split(' - ')[0], csvEsc(l.vat), l.tax.toFixed(2)].join(','));
     });
   });
