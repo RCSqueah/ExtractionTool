@@ -4279,6 +4279,16 @@ function findPdfStatementHeader(lines) {
   return null;
 }
 
+// A PDF's text, line by line, with pieces far apart on a line separated by
+// " | " (as table cells are in an email) — e.g. for invoices.
+async function readPdfText(file) {
+  const pages = await readPdfTextLines(file);
+  return pages.map(lines => lines.map(l => l.items.reduce((t, it, i) => {
+    if (!i) return it.s;
+    return t + (it.x - l.items[i - 1].right > 12 ? ' | ' : ' ') + it.s;
+  }, '')).join('\n')).join('\n');
+}
+
 // Reads a statement PDF into { stmt, info, warning }, or null if it isn't a
 // text statement with recognisable columns (e.g. a receipt or a scan).
 // Lines that are the statement's own totals or balances, not transactions.
@@ -4568,7 +4578,7 @@ For each invoice:
 - "kind": "sales" if issued by the client or their business; "purchase" if issued to them by someone else.
 - "issuer": who issued it. "customer": the "Bill To" name — its first line only, as written.
 - "date": the invoice date as YYYY-MM-DD (dates are UK day/month/year).
-- "lines": every priced item, in order, as printed. "title" is the item's heading exactly as written (e.g. "EXTERIOR DECORATING", "Materials ESTIMATE"); "details" is the text describing it under that heading, exactly as written, lines joined with new lines ("" if none); "amount" is its price before VAT. Subtotal, VAT, Total, Discount, Deposit and payment lines are NOT items.
+- "lines": every priced item, in order, as printed. "title" is the item's heading exactly as written (e.g. "EXTERIOR DECORATING", "Materials ESTIMATE"); "details" is the text describing it under that heading, exactly as written, lines joined with new lines ("" if none); "amount" is its price before VAT. Subtotal, VAT, Total, Discount, Deposit and payment lines are NOT items. Every item must have its wording: if an item has no heading, use the first line of its description as "title"; never return just an amount.
 - "discount": a discount amount as a positive number, or null.
 - "subtotal", "vat", "total": exactly as printed, or null if not shown — never work them out yourself.
 - "payments": payments already received shown on the invoice (e.g. a "Payment Summary"), each with date (YYYY-MM-DD or null), method (e.g. "Cash") and amount. [] if none.
@@ -4649,8 +4659,10 @@ function buildSalesInvoice(inv, sourceText, sourceLabel) {
     const details = String(l.details || '').split('\n').map(x => x.trim().replace(/[.,;:]+$/, '').trim()).filter(Boolean).join(', ');
     return [title, details].filter(Boolean).join(' - ');
   };
+  // A line Claude found no wording for is never left as just a figure.
+  if (lines.some(l => !itemText(l).replace(/[£$€\d.,\s-]/g, ''))) notes.push('A line had no description on the invoice — check it');
   const outLines = lines.map(l => ({
-    desc: itemText(l),
+    desc: itemText(l).replace(/[£$€\d.,\s-]/g, '') ? itemText(l) : `Invoice ${String(inv.invoiceNumber || '').trim()}`,
     amount: round2(l.amount), acc, vat: taxName,
   }));
   if (discount) outLines.push({ desc: 'Discount', amount: -discount, acc, vat: taxName });
@@ -5113,7 +5125,7 @@ async function processUnifiedQueue() {
     renderUploadFileList();
     statusEl.textContent = `Processing ${item.file.name} (${done+1}/${toProcess.length})…`;
     const kind = uploadFileKind(item.file);
-    let pdfStatement = null;
+    let pdfStatement = null, pdfInvoiceText = '';
     try {
       if (kind === 'xlsx') {
         // A spreadsheet that's a transaction list (Date + Amount columns)
@@ -5167,6 +5179,13 @@ async function processUnifiedQueue() {
         item.info = pdfStatement.info || null;
         item.retry = result.retry || null;
         if (result.added) setExportType('bank');
+      } else if (kind === 'pdf' && (pdfInvoiceText = await readPdfText(item.file).catch(() => '')) && looksLikeInvoices(pdfInvoiceText)) {
+        // The client's own sales invoices as PDFs (e.g. from an invoicing
+        // app) — read like invoices in an email, line by line.
+        const result = await parseSalesInvoicesText(pdfInvoiceText, item.file.name, (msg) => { statusEl.textContent = msg; });
+        item.addedCount = result.added;
+        item.info = result.info || null;
+        item.warning = result.warning || null;
       } else if (kind === 'pdf' || kind === 'image') {
         const aiRows = await callChambersExtraction(item.file, kind);
         aiRows.forEach(r => addRow(mapChambersRowToInternal(r)));
