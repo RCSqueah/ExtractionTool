@@ -3820,7 +3820,7 @@ function buildBankStatementExtractionSystemPrompt() {
 
 Extract EVERY transaction line as its own row — do not skip or merge any, and do not filter anything out yourself.
 
-CHART OF ACCOUNTS (choose the single best-fit code only if you are confident — for money out the expense category, for money in the income account such as Revenue for customer receipts; use the exact code shown; leave accountCode null if unsure or if the chart is empty). Use the Section heading as a strong hint (e.g. "Van Expenses" and "Car Expenses" are motor expenses):
+CHART OF ACCOUNTS (choose the single best-fit code only if you are confident — for money out the expense category, for money in the income account such as Revenue for customer receipts — but a refund from a supplier (e.g. money back from a shop the client buys from) goes to the same cost account as the purchases, not to Revenue; use the exact code shown; leave accountCode null if unsure or if the chart is empty). Use the Section heading as a strong hint (e.g. "Van Expenses" and "Car Expenses" are motor expenses):
 ${coaText}
 
 For each transaction:
@@ -5056,7 +5056,15 @@ function addRow(data) {
 
   // The accountant's own earlier correction for this line wins over what
   // came in (Claude's choice or the file's), and says so in Notes.
-  const mine = lookupUserRule(d.supplier, d.desc, d.direction === 'in' ? 'in' : 'out');
+  let mine = lookupUserRule(d.supplier, d.desc, d.direction === 'in' ? 'in' : 'out');
+  // Money in from a supplier you've coded as a cost is most likely a refund:
+  // the same account as its purchases (a payment for a sales invoice is
+  // still matched to the invoice afterwards — see matchSalesReceipts).
+  let refund = false;
+  if (!mine && d.direction === 'in') {
+    const out = lookupUserRule(d.supplier, d.desc, 'out');
+    if (out && !/revenue|sales|income|turnover/i.test(out.acc)) { mine = out; refund = true; }
+  }
   if (mine) {
     const before = acc;
     if (mine.acc !== acc || (!vatOverride && mine.vat && mine.vat !== vat)) {
@@ -5064,7 +5072,8 @@ function addRow(data) {
       if (!vatOverride && mine.vat) vat = mine.vat;
       // A "usually coded to…" check no longer applies.
       notes = joinNotes(notes.split(' · ').filter(n => !/^Check: this client/.test(n)));
-      notes = joinNotes([before && before !== acc ? `Coded as you've coded it before (was: ${before})` : "Coded as you've coded it before", notes]);
+      const how = refund ? `Money in from ${d.supplier || 'a supplier you pay'} — looks like a refund, coded to the same account as its purchases; check` : "Coded as you've coded it before";
+      notes = joinNotes([before && before !== acc ? `${how} (was: ${before})` : how, notes]);
     }
   } else if (!acc) {
     // Nothing came in coded (no account) — check this client's history
