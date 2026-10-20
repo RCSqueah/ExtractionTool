@@ -1,6 +1,6 @@
-# Expense Parser — Xero Export
+# Extraction Tool — Xero Export
 
-A browser tool that turns client expense documents (expense templates `.xlsx`, Outlook `.msg` emails, chambers bill PDFs/scans, bank statement CSVs, or pasted email text) into a Xero-ready CSV (Bills or Bank Statement format).
+A browser tool that turns a client's documents (expense templates and lists, bank statements as CSV or PDF, bills and receipts, emails, their own notes, and their sales invoices) into Xero-ready CSVs: Bills, Bank Statement or Sales Invoices.
 
 Features include a per-client chart of accounts learned from a Xero export, remembered coding history, a use-of-home calculator, business-use % adjustments, row merging, and supplier VAT overrides.
 
@@ -16,7 +16,8 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
   - bank statements and transaction lists (.csv or .xlsx). These are read line by line, and the Description and amount come from the file;
   - bank statement PDFs with text in columns (e.g. Starling's monthly statement). Each line is read exactly as printed, amounts are put in or out by their column, and the totals are checked against the statement's own summary;
   - chambers bills and receipts (PDF, PNG, JPG);
-  - Outlook emails (.msg) or pasted email text;
+  - emails (.msg or .eml) or pasted email text;
+  - the client's own sales invoices, e.g. sent by email. Each invoice is read once by its number, even if it's repeated in a reply chain or another email. The lines are kept as printed, the totals are checked, and the invoices go to their own **Sales Invoices CSV**. Their payments on the bank statement are left uncoded, with the invoice number as the reference, so you match them to the invoices in Xero instead of counting the sale twice. Invoices already in Xero are left out: ones exported from this tool, and ones listed in a Xero export dropped into Step ① (Account Transactions, or Business → Invoices → Export);
   - a client's own notes or year summaries (.odt, .docx, .txt, or a spreadsheet list). Claude reads these, and each Description is the client's own wording, checked against the document.
 
   Step ① takes last year's Xero Account Transactions export, plus Xero's Chart of Accounts export (.csv) if the transactions export has no account codes; one **Process everything** press reads both. It also picks out last year's business-use adjustments (e.g. "Motor expenses 60% business use", "Use of Home 1 of 4 rooms") and shows them under the client for reference.
