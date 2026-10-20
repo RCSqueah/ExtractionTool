@@ -276,7 +276,7 @@
     const docs = collectDocs();
     const backup = { app: 'expense-parser', version: 1, savedAt: new Date().toISOString(), docs };
     const stamp = new Date().toISOString().slice(0, 10);
-    saveFile(`expense-parser-backup-${stamp}.json`, new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+    saveFile(`extraction-tool-backup-${stamp}.json`, new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
     setStatus(`✓ Backed up ${Object.keys(docs).length} record${Object.keys(docs).length !== 1 ? 's' : ''}.`);
   };
 
@@ -326,7 +326,7 @@
       return;
     }
     if (!backup || backup.app !== 'expense-parser' || !backup.docs || typeof backup.docs !== 'object') {
-      setStatus('That file is not an Expense Parser backup.');
+      setStatus('That file is not an Extraction Tool backup.');
       return;
     }
     const entries = Object.entries(backup.docs);

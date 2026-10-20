@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Expense Parser — Xero Export</title>
+<title>Extraction Tool — Xero Export</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="runtime.js"></script>
 <style>
@@ -279,6 +279,8 @@
     background: var(--red-bg);
   }
   tbody tr.income-row { background: #f1f8f3; }
+  #salesTable tbody tr.sales-excluded td { color: var(--text-faint); }
+  #salesTable tbody td { vertical-align: top; }
   tbody tr.income-row:hover { background: #e4f2e8; }
 
   tbody td {
@@ -611,9 +613,9 @@
 <body>
 
 <header>
-  <h1>⬡ EXPENSE PARSER</h1>
+  <h1>⬡ EXTRACTION TOOL</h1>
   <div style="display:flex;align-items:center;gap:14px;">
-    <span>EXPENSES → XERO CSV</span>
+    <span>DOCUMENTS → XERO CSV</span>
     <button type="button" id="settingsToggle" onclick="toggleSettingsPanel()" style="background:transparent;color:#fff;border:1px solid #555;border-radius:6px;padding:5px 12px;font-family:'IBM Plex Mono',monospace;font-size:11px;cursor:pointer;">⚙ SETTINGS</button>
   </div>
 </header>
@@ -677,7 +679,7 @@
 
   <!-- ALERT -->
   <div class="alert alert-info show" id="mainAlert">
-    Drop the client's completed expense template (.xlsx), a chambers bill, an email, or a raw bank statement export (.csv) below to begin. All data stays in your browser — nothing is uploaded.
+    Drop in the client's documents below to begin — expense templates and lists (.xlsx), bank statements (.csv or PDF), bills and receipts, emails (.msg / .eml) or sales invoices. All data stays in your browser; only the documents themselves are sent to Claude to be read.
   </div>
 
   <!-- SETTINGS -->
@@ -780,7 +782,7 @@
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
-      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple>
+      <input type="file" id="unifiedFileInput" accept=".xlsx,.xls,.msg,.eml,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple>
       <div class="drop-icon" style="font-size:26px;margin-bottom:8px;">📎</div>
       <div style="font-size:13px;">Click or drop files here — templates, emails, chambers bill PDFs/scans, bank statement CSVs, the client's own notes/accounts (.odt, .docx, .txt), or a .zip of any of these</div>
     </div>
@@ -945,6 +947,38 @@
     <span id="exportNote" style="font-size:12px;color:var(--text-faint);margin-left:4px"></span>
   </div>
 
+  <!-- SALES INVOICES (see renderSalesTable) -->
+  <div id="salesSection" style="display:none;margin-top:28px;">
+    <div class="table-header">
+      <h3>SALES INVOICES</h3>
+    </div>
+    <div class="helptext" style="font-size:12px;color:var(--text-muted);margin:-4px 0 10px;">
+      The client's own invoices, one line per priced item, as printed (amounts before VAT). Each invoice number appears once — repeats in other emails aren't added again, and invoices already exported to Xero are left out. Their payments on the bank statement are left uncoded with the invoice number as the reference, so in Xero you match them to these invoices instead of counting the sale twice.
+    </div>
+    <div class="table-wrap">
+      <table id="salesTable">
+        <thead><tr>
+          <th style="width:56px">Include</th>
+          <th>Invoice #</th>
+          <th>Date</th>
+          <th>Customer</th>
+          <th style="min-width:260px">Description</th>
+          <th class="text-right">Net £</th>
+          <th class="text-right">VAT £</th>
+          <th style="min-width:170px">Account</th>
+          <th style="min-width:180px">Tax rate</th>
+          <th class="text-right">Total £</th>
+          <th style="min-width:220px">Notes</th>
+        </tr></thead>
+        <tbody id="salesBody"></tbody>
+      </table>
+    </div>
+    <div class="export-bar">
+      <button class="btn btn-primary" id="salesExportBtn" onclick="exportSalesCSV()" disabled>↓ Download Xero CSV (Sales Invoices)</button>
+      <span id="salesNote" style="font-size:12px;color:var(--text-faint);margin-left:4px"></span>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -1066,6 +1100,7 @@ async function loadClientRules() {
   currentExtraInstructions = '';
   currentFlatRate = false;
   currentAdjustments = [];
+  currentSalesExported = {};
 
   if (name) {
     const { db } = await getCaps();
@@ -1083,6 +1118,7 @@ async function loadClientRules() {
           if (typeof data.notes === 'string') currentExtraInstructions = data.notes;
           currentFlatRate = data.flatRate === true;
           if (Array.isArray(data.adjustments)) currentAdjustments = data.adjustments;
+          if (data.salesExported && typeof data.salesExported === 'object') currentSalesExported = data.salesExported;
         }
       } catch (e) {
         // No history yet for this client — that's fine, starts empty.
@@ -1122,6 +1158,7 @@ async function saveClientDoc() {
       notes: currentExtraInstructions,
       flatRate: currentFlatRate,
       adjustments: currentAdjustments,
+      salesExported: currentSalesExported,
     });
   } catch (e) {
     console.error('Could not save client data:', e);
@@ -1376,7 +1413,7 @@ function onFlatRateChange(checked) {
       if (r.direction === 'in' || r.vat === 'No VAT') return;
       r.vat = 'No VAT';
       const tr = document.getElementById('tr_' + r.id);
-      if (tr) { tr.innerHTML = buildRowHTML(r); tr.classList.toggle('needs-attention', !r.acc || !r.vat); }
+      if (tr) { tr.innerHTML = buildRowHTML(r); tr.classList.toggle('needs-attention', rowNeedsAttention(r)); }
     });
     updateUI();
   }
@@ -2014,11 +2051,12 @@ function startNewJobIfClientChanged(newClient) {
   const prevClient = currentClientKey;
   if (!prevClient || prevClient === newClient) return;
   const email = document.getElementById('emailPasteBox');
-  const hasWork = rows.length || uploadQueue.length || xeroExportQueue.length || (email && email.value.trim());
+  const hasWork = rows.length || salesInvoices.length || uploadQueue.length || xeroExportQueue.length || (email && email.value.trim());
   lastJobSnapshot = hasWork ? {
     client: prevClient,
     rows: rows.map(r => ({ ...r })),
     nextId,
+    salesInvoices: salesInvoices.slice(),
     uploadQueue: uploadQueue.slice(),
     xeroExportQueue: xeroExportQueue.slice(),
     hashes: new Map(importedFileHashes),
@@ -2065,6 +2103,8 @@ async function undoNewJob() {
   rows = snap.rows;
   nextId = snap.nextId;
   rows.forEach(r => renderRow(r));
+  salesInvoices = snap.salesInvoices || [];
+  renderSalesTable();
   uploadQueue = snap.uploadQueue;
   renderUploadFileList();
   xeroExportQueue = snap.xeroExportQueue;
@@ -2567,6 +2607,19 @@ async function parseEmail() {
 
   const fallbackDate = getQuarterEndDate();
 
+  // Sales invoices (e.g. the client's invoices pasted or sent by email).
+  if (looksLikeInvoices(text)) {
+    try {
+      const result = await parseSalesInvoicesText(text, 'the email', msg => setEmailStatus(msg, 'info'));
+      document.getElementById('emailPasteBox').value = '';
+      setEmailStatus(`✓ ${result.info}${result.warning ? ' ' + result.warning : ''}`, result.warning ? 'warn' : 'success');
+      return result.added;
+    } catch (err) {
+      setEmailStatus('Could not read the invoices: ' + err.message, 'warn');
+      return 0;
+    }
+  }
+
   setEmailStatus('Extracting expenses…', 'info');
 
   try {
@@ -2712,6 +2765,7 @@ function uploadFileKind(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   if (ext === 'xlsx' || ext === 'xls') return 'xlsx';
   if (ext === 'msg') return 'msg';
+  if (ext === 'eml') return 'eml';
   if (ext === 'pdf') return 'pdf';
   if (['png','jpg','jpeg'].includes(ext)) return 'image';
   if (ext === 'csv') return 'bankcsv';
@@ -3993,6 +4047,424 @@ async function readPdfStatement(file) {
   return { stmt, info, warning };
 }
 
+// ── EMAIL FILES (.eml) ──────────────────────────────────────────────────────
+// A saved email (.eml) is plain MIME text. Its body — the text part, or the
+// HTML part turned into text with table cells kept as "cell | cell" — is
+// read here; attached pictures (signatures, logos) are ignored.
+function decodeMimeBody(body, encoding, charset) {
+  let bytes;
+  const enc = String(encoding || '').toLowerCase();
+  if (enc === 'base64') {
+    const bin = atob(body.replace(/[^A-Za-z0-9+/=]/g, ''));
+    bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  } else if (enc === 'quoted-printable') {
+    const s = body.replace(/=\r?\n/g, '');
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '=' && /^[0-9A-Fa-f]{2}$/.test(s.substr(i + 1, 2))) { out.push(parseInt(s.substr(i + 1, 2), 16)); i += 2; }
+      else out.push(s.charCodeAt(i) & 0xff);
+    }
+    bytes = Uint8Array.from(out);
+  } else {
+    bytes = Uint8Array.from(body, c => c.charCodeAt(0) & 0xff);
+  }
+  try { return new TextDecoder(charset || 'utf-8').decode(bytes); } catch (_) { return new TextDecoder('utf-8').decode(bytes); }
+}
+
+function walkMime(entity, out) {
+  const m = entity.match(/\r?\n\r?\n/);
+  if (!m) return;
+  const head = entity.slice(0, m.index).replace(/\r?\n[ \t]+/g, ' ');
+  const body = entity.slice(m.index + m[0].length);
+  const header = name => { const h = head.match(new RegExp(`^${name}:\\s*(.*)$`, 'im')); return h ? h[1] : ''; };
+  const ctype = header('Content-Type') || 'text/plain';
+  const type = ctype.split(';')[0].trim().toLowerCase();
+  const param = n => { const p = ctype.match(new RegExp(`${n}\\s*=\\s*"?([^";]+)"?`, 'i')); return p ? p[1].trim() : ''; };
+  if (type.startsWith('multipart/')) {
+    const boundary = param('boundary');
+    if (!boundary) return;
+    body.split('--' + boundary).slice(1).forEach(part => {
+      if (part.startsWith('--')) return;
+      walkMime(part.replace(/^\r?\n/, ''), out);
+    });
+  } else if (type === 'text/plain' || type === 'text/html') {
+    if (/attachment/i.test(header('Content-Disposition'))) return;
+    out.push({ type, text: decodeMimeBody(body, header('Content-Transfer-Encoding'), param('charset')) });
+  }
+}
+
+function htmlToText(html) {
+  let t = String(html).replace(/<(style|script)[\s\S]*?<\/\1>/gi, '');
+  t = t.replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d|table)>/gi, '\n').replace(/<\/t[dh]>/gi, ' | ').replace(/<[^>]+>/g, '');
+  const ta = document.createElement('textarea');
+  ta.innerHTML = t; // decodes &amp; &pound; etc. without running anything
+  return ta.value.replace(/[ \t ]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+}
+
+async function readEmlText(file) {
+  const raw = new Uint8Array(await file.arrayBuffer());
+  let latin = '';
+  for (let i = 0; i < raw.length; i += 0x8000) latin += String.fromCharCode.apply(null, raw.subarray(i, i + 0x8000));
+  const parts = [];
+  walkMime(latin, parts);
+  const plain = parts.find(p => p.type === 'text/plain' && p.text.trim());
+  const html = parts.find(p => p.type === 'text/html' && p.text.trim());
+  // Outlook often sends only HTML; its tables (e.g. invoice layouts) read
+  // better from the HTML than from a flattened plain-text copy.
+  if (html) return htmlToText(html.text);
+  return plain ? plain.text.trim() : '';
+}
+
+// ── SALES INVOICES ──────────────────────────────────────────────────────────
+// The client's own sales invoices (e.g. sent by email) become a Xero Sales
+// Invoices import: one invoice per invoice number, its lines as printed.
+// Claude reads each invoice's number, customer, date and priced lines (in
+// the invoice's own words, checked against the email); the totals are then
+// checked here. Each invoice number is kept once — an invoice repeated in a
+// reply chain or in a second email isn't added twice, and one already
+// exported to Xero for this client is left out. Payments for these
+// invoices on the bank statement are matched to them (matchSalesReceipts)
+// and left uncoded, so the sale isn't counted twice.
+let salesInvoices = [];
+let salesNextId = 0;
+let currentSalesExported = {}; // per client: { invoiceNumber: 'YYYY-MM-DD' exported }
+
+function looksLikeInvoices(text) {
+  const t = String(text || '');
+  return /\binvoice\s*(?:#|no\.?|number)\s*[:|]?\s*\|?\s*[A-Z0-9\-\/]*\d/i.test(t) && /\b(bill(?:ed)?\s+to|invoice\s+to)\b/i.test(t);
+}
+
+const gbpText = v => `£${Number(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function defaultIncomeAccount() {
+  const acc = ACCOUNTS.filter(a => !isStandardAccount(a.code));
+  const f = acc.find(a => /^(revenue|sales|turnover)$/i.test(a.name.trim()))
+    || acc.find(a => /revenue|sales|income|turnover/i.test(a.name) && !/flat rate|interest|expense/i.test(a.name));
+  return f ? `${f.code} - ${f.name}` : '';
+}
+
+const SALES_INVOICES_SCHEMA = {
+  type: 'object',
+  properties: {
+    invoices: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          invoiceNumber: { type: 'string' },
+          kind: { type: 'string', enum: ['sales', 'purchase'] },
+          issuer: { type: 'string' },
+          customer: { type: 'string' },
+          date: nullable({ type: 'string' }),
+          lines: { type: 'array', items: { type: 'object', properties: {
+            title: { type: 'string' }, details: { type: 'string' }, amount: { type: 'number' },
+          }, required: ['title', 'details', 'amount'], additionalProperties: false } },
+          discount: nullable({ type: 'number' }),
+          subtotal: nullable({ type: 'number' }),
+          vat: nullable({ type: 'number' }),
+          total: nullable({ type: 'number' }),
+          payments: { type: 'array', items: { type: 'object', properties: {
+            date: nullable({ type: 'string' }), method: { type: 'string' }, amount: { type: 'number' },
+          }, required: ['date', 'method', 'amount'], additionalProperties: false } },
+          depositDue: nullable({ type: 'number' }),
+          accountCode: nullable({ type: 'string' }),
+          isFinal: { type: 'boolean' },
+          issues: { type: 'string' },
+        },
+        required: ['invoiceNumber', 'kind', 'issuer', 'customer', 'date', 'lines', 'discount', 'subtotal', 'vat', 'total', 'payments', 'depositDue', 'accountCode', 'isFinal', 'issues'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['invoices'],
+  additionalProperties: false,
+};
+
+function buildSalesInvoicePrompt() {
+  const client = document.getElementById('clientName').value.trim() || 'the client';
+  const income = ACCOUNTS.filter(a => !isStandardAccount(a.code) && /revenue|sales|income|turnover/i.test(a.name) && !/flat rate/i.test(a.name));
+  return `You are reading invoices for a UK accountant's client, ${client}, to import into Xero. They are usually the client's own SALES invoices — issued by the client or their business (often under a trading name, with the client's own payment details) to the client's customers. Some may instead be invoices the client received from suppliers (purchases).
+
+Return each distinct invoice once. An invoice quoted again further down a reply chain is the same invoice — don't repeat it.
+
+For each invoice:
+- "invoiceNumber": exactly as shown.
+- "kind": "sales" if issued by the client or their business; "purchase" if issued to them by someone else.
+- "issuer": who issued it. "customer": the "Bill To" name — its first line only, as written.
+- "date": the invoice date as YYYY-MM-DD (dates are UK day/month/year).
+- "lines": every priced item, in order, as printed. "title" is the item's heading exactly as written (e.g. "EXTERIOR DECORATING", "Materials ESTIMATE"); "details" is the text describing it under that heading, exactly as written, lines joined with new lines ("" if none); "amount" is its price before VAT. Subtotal, VAT, Total, Discount, Deposit and payment lines are NOT items.
+- "discount": a discount amount as a positive number, or null.
+- "subtotal", "vat", "total": exactly as printed, or null if not shown — never work them out yourself.
+- "payments": payments already received shown on the invoice (e.g. a "Payment Summary"), each with date (YYYY-MM-DD or null), method (e.g. "Cash") and amount. [] if none.
+- "depositDue": a deposit asked for, or null.
+- "accountCode": the income account for this invoice from the list below if you are confident, else null.
+- "isFinal": false if it says it's a quote, estimate, proforma or deposit request, or that VAT will be added on a final invoice; otherwise true.
+- "issues": anything unclear or missing (e.g. no total shown), else "".
+
+INCOME ACCOUNTS:
+${income.length ? income.map(a => `${a.code} - ${a.name}`).join('\n') : '(none set up — leave accountCode null)'}
+
+Never invent a figure that isn't printed.`;
+}
+
+// Splits a long email between invoices so each request stays a sensible size.
+function chunkInvoiceText(text, maxChars) {
+  const lines = String(text).split('\n');
+  const chunks = [];
+  let cur = [];
+  let size = 0;
+  for (const line of lines) {
+    const startsInvoice = /^\s*(tax\s+)?invoice\s*$/i.test(line);
+    if (startsInvoice && size > maxChars * 0.6 && cur.length) { chunks.push(cur.join('\n')); cur = []; size = 0; }
+    cur.push(line); size += line.length + 1;
+    if (size > maxChars) { chunks.push(cur.join('\n')); cur = []; size = 0; }
+  }
+  if (cur.length) chunks.push(cur.join('\n'));
+  return chunks;
+}
+
+async function callSalesInvoiceExtraction(text) {
+  const { sample } = await getCaps();
+  if (!sample) throw new Error('Asking Claude is not available in this view.');
+  const prompt = `${buildSalesInvoicePrompt()}\n\nReturn {"invoices": [ ... ]}.\n\nHere is the email or document text:\n\n${text}`;
+  try {
+    const parsed = await sample.json(prompt, { schema: SALES_INVOICES_SCHEMA, modelTier: 'default', cache: false });
+    return parsed && Array.isArray(parsed.invoices) ? parsed.invoices : [];
+  } catch (e) {
+    if (e && e.code === 'invalid_json') throw new Error('Model did not return valid JSON: ' + e.message);
+    throw new Error(sampleErrorMessage(e));
+  }
+}
+
+const invoiceKey = n => String(n || '').trim().toLowerCase().replace(/^(inv(oice)?\s*(no\.?|#)?\s*)/i, '').replace(/\s+/g, '');
+
+// Turns Claude's reading of one sales invoice into a checked entry.
+function buildSalesInvoice(inv, sourceText, sourceLabel) {
+  const notes = [];
+  const lines = (inv.lines || []).filter(l => l && (l.title || l.details) && !isNaN(Number(l.amount)));
+  const norm = normaliseForMatch(sourceText);
+  const wordsMissing = lines.some(l => l.title && !norm.includes(normaliseForMatch(l.title)));
+  if (wordsMissing) notes.push("Some line wording couldn't be found word for word in the email — check it");
+  const sumLines = round2(lines.reduce((s, l) => s + Number(l.amount), 0));
+  const discount = round2(inv.discount || 0);
+  const net = round2(sumLines - discount);
+  if (inv.subtotal !== null && inv.subtotal !== undefined && Math.abs(inv.subtotal - sumLines) > 0.01 && Math.abs(inv.subtotal - net) > 0.01) {
+    notes.push(`Lines add up to ${gbpText(sumLines)} but the subtotal says ${gbpText(inv.subtotal)} — check`);
+  }
+  const vat = round2(inv.vat || 0);
+  const rates = [0.2, 0.05, 0];
+  const rate = net > 0 ? rates.reduce((b, r) => Math.abs(vat - net * r) < Math.abs(vat - net * b) ? r : b) : 0;
+  if (Math.abs(vat - round2(net * rate)) > 0.02) notes.push(`VAT ${gbpText(vat)} isn't ${rate * 100}% of ${gbpText(net)} — check`);
+  const expected = round2(net + vat);
+  let total = inv.total;
+  if (total === null || total === undefined) {
+    total = expected;
+    notes.push(`No total on the invoice — worked out as ${gbpText(expected)}`);
+  } else if (Math.abs(total - expected) > 0.01) {
+    notes.push(`Total ${gbpText(total)} doesn't equal net ${gbpText(net)} + VAT ${gbpText(vat)} — check`);
+  }
+  const taxName = rate === 0.2 ? '20% (VAT on Income)' : rate === 0.05 ? '5% (VAT on Income)' : 'No VAT';
+  const claudeAcc = inv.accountCode ? ACCOUNTS.find(a => a.code === String(inv.accountCode)) : null;
+  const acc = claudeAcc ? `${claudeAcc.code} - ${claudeAcc.name}` : defaultIncomeAccount();
+  const outLines = lines.map(l => ({
+    desc: [String(l.title || '').trim(), String(l.details || '').trim()].filter(Boolean).join('\n'),
+    amount: round2(l.amount), acc, vat: taxName,
+  }));
+  if (discount) outLines.push({ desc: 'Discount', amount: -discount, acc, vat: taxName });
+  // VAT per line, with any rounding put on the last line so it adds up to
+  // the invoice's own VAT.
+  let taxLeft = vat;
+  outLines.forEach((l, i) => {
+    l.tax = i === outLines.length - 1 ? round2(taxLeft) : round2(l.amount * rate);
+    taxLeft = round2(taxLeft - l.tax);
+  });
+  const paid = round2((inv.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  (inv.payments || []).forEach(p => notes.push(`${gbpText(p.amount)} paid${p.method ? ` (${p.method.toLowerCase()})` : ''}${p.date ? ` on ${fmtDate(p.date)}` : ''} per the invoice — record it against the invoice in Xero`));
+  let include = true;
+  if (!inv.isFinal) {
+    include = false;
+    notes.push('Not a final invoice (a quote, deposit request, or VAT still to be added) — left out; tick Include if it should go to Xero');
+  }
+  if (inv.issues) notes.push(inv.issues);
+  return {
+    id: salesNextId++, include, number: String(inv.invoiceNumber || '').trim(), date: inv.date || '',
+    customer: String(inv.customer || '').trim(), lines: outLines, net, vat, total: round2(total),
+    paid, outstanding: round2(total - paid), deposit: inv.depositDue ? round2(inv.depositDue) : null,
+    notes, source: sourceLabel, matched: null,
+  };
+}
+
+// Reads the sales invoices in an email's text. Returns
+// { added, skipped, purchases, info, warning }.
+async function parseSalesInvoicesText(text, sourceLabel, onProgress) {
+  const chunks = chunkInvoiceText(text, 20000);
+  const found = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress(`Reading invoices in ${sourceLabel}${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}…`);
+    (await callSalesInvoiceExtraction(chunks[i])).forEach(inv => found.push(inv));
+  }
+  let added = 0, purchases = 0;
+  const repeated = [], exportedBefore = [], fresh = [];
+  for (const inv of found) {
+    if (inv.kind === 'purchase') {
+      // A supplier's invoice is a cost, not a sale.
+      addRow({
+        supplier: inv.issuer, ref: inv.invoiceNumber, date: inv.date || '',
+        desc: (inv.lines || []).map(l => l.title).filter(Boolean).join('; ') || `Invoice ${inv.invoiceNumber}`,
+        gross: inv.total ?? '', notes: 'Supplier invoice from email — check account and VAT',
+      });
+      purchases++;
+      continue;
+    }
+    const key = invoiceKey(inv.invoiceNumber);
+    if (!key) continue;
+    if (salesInvoices.some(s => invoiceKey(s.number) === key)) { repeated.push(inv.invoiceNumber); continue; }
+    const entry = buildSalesInvoice(inv, text, sourceLabel);
+    const before = currentSalesExported[key];
+    if (before) {
+      entry.include = false;
+      entry.notes.unshift(`Already exported to Xero on ${fmtDate(before)} — left out`);
+      exportedBefore.push(inv.invoiceNumber);
+    }
+    salesInvoices.push(entry);
+    fresh.push(entry);
+    added++;
+  }
+  if (purchases) showTable();
+  matchSalesReceipts();
+  renderSalesTable();
+  const notes = [];
+  if (repeated.length) notes.push(`${repeated.length} invoice${repeated.length !== 1 ? 's were' : ' was'} already read (${repeated.slice(0, 6).join(', ')}${repeated.length > 6 ? ', …' : ''}) — not added twice.`);
+  if (exportedBefore.length) notes.push(`${exportedBefore.length} already exported to Xero before — left out (${exportedBefore.slice(0, 6).join(', ')}).`);
+  const flagged = fresh.filter(s => !/^Already exported/.test(s.notes[0] || '') && s.notes.some(n => /check|left out|worked out/i.test(n))).length;
+  return {
+    added: added + purchases,
+    info: added || purchases
+      ? `${added} sales invoice${added !== 1 ? 's' : ''} read${purchases ? `, ${purchases} supplier invoice${purchases !== 1 ? 's' : ''} added as costs` : ''} — see Sales Invoices below.`
+      : 'No new invoices in this file.',
+    warning: [notes.join(' '), flagged ? `${flagged} invoice${flagged !== 1 ? 's need' : ' needs'} a look (see Notes in Sales Invoices).` : ''].filter(Boolean).join(' '),
+  };
+}
+
+// Payments for the sales invoices on the bank statement: a money-in line
+// for the invoice's total (or what's left after a payment shown on it, or a
+// deposit asked for), from the customer or quoting the invoice number,
+// dated near the invoice. Such a line is left uncoded with the invoice
+// number as its Reference, so in Xero it's matched to the invoice rather
+// than coded to Revenue a second time.
+function matchSalesReceipts() {
+  const receipts = rows.filter(r => r.fromBank && r.direction === 'in');
+  if (!receipts.length || !salesInvoices.length) return;
+  const changed = new Set();
+  const stop = /^(mr|mrs|ms|miss|dr|ltd|limited|the|and|from|plumbing|services|uk)$/i;
+  for (const inv of salesInvoices) {
+    if (inv.matched) continue;
+    const names = inv.customer.split(/[^A-Za-z]+/).filter(w => w.length >= 3 && !stop.test(w));
+    const targets = [inv.total, inv.outstanding, inv.deposit].filter(v => v > 0);
+    const num = String(inv.number).replace(/[^0-9A-Za-z]/g, '');
+    const cands = receipts.filter(r => !r.salesMatch).map(r => {
+      const text = `${r.desc || ''} ${r.supplier || ''}`;
+      const amount = Number(r.gross);
+      const days = (Date.parse(r.date) - Date.parse(inv.date)) / 864e5;
+      if (isNaN(days) || days < -7 || days > 120) return null;
+      const amountHit = targets.find(t => Math.abs(t - amount) < 0.005);
+      const nameHit = names.some(w => new RegExp(`\\b${w}\\b`, 'i').test(text));
+      const numHit = num && new RegExp(`(^|[^0-9])${num}([^0-9]|$)`).test(text);
+      return { r, amount, amountHit, nameHit, numHit, days };
+    }).filter(Boolean);
+    const sameAmount = cands.filter(c => c.amountHit !== undefined);
+    const strong = cands.filter(c => (c.amountHit !== undefined && (c.nameHit || c.numHit || sameAmount.length === 1)) || (c.numHit && c.nameHit))
+      .sort((a, b) => (b.amountHit !== undefined) - (a.amountHit !== undefined) || (b.numHit + b.nameHit) - (a.numHit + a.nameHit) || Math.abs(a.days) - Math.abs(b.days));
+    const best = strong[0];
+    if (!best) continue;
+    const r = best.r;
+    const what = best.amountHit !== undefined && best.amountHit === inv.deposit && best.amountHit !== inv.total ? 'Deposit for' : 'Payment for';
+    const differs = best.amountHit === undefined ? ` The amount (${gbpText(best.amount)}) differs from the invoice (${gbpText(inv.total)}) — check.` : '';
+    r.salesMatch = inv.number;
+    r.acc = ''; r.vat = '';
+    if (!r.ref) r.ref = inv.number;
+    r.notes = joinNotes([`${what} sales invoice ${inv.number} (${inv.customer}, ${gbpText(inv.total)}) — leave uncoded and match it to the invoice in Xero, so the sale isn't counted twice.${differs}`, r.notes]);
+    inv.matched = r.date;
+    changed.add(r.id);
+  }
+  changed.forEach(id => {
+    const r = rows.find(x => x.id === id);
+    const tr = document.getElementById('tr_' + id);
+    if (r && tr) { tr.innerHTML = buildRowHTML(r); tr.classList.toggle('needs-attention', rowNeedsAttention(r)); }
+  });
+  if (changed.size) { updateSummary(); refreshExportBtn(); }
+}
+
+function renderSalesTable() {
+  const section = document.getElementById('salesSection');
+  if (!section) return;
+  section.style.display = salesInvoices.length ? 'block' : 'none';
+  const body = document.getElementById('salesBody');
+  const accOpts = sel => ACCOUNTS.map(a => `${a.code} - ${a.name}`).map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('') + (sel && !ACCOUNTS.some(a => `${a.code} - ${a.name}` === sel) ? `<option selected>${esc(sel)}</option>` : '') + (!sel ? '<option value="" selected>— choose —</option>' : '');
+  const vatOpts = sel => VAT_RATES.map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('');
+  body.innerHTML = salesInvoices.map(inv => inv.lines.map((l, i) => {
+    const first = i === 0;
+    const span = inv.lines.length;
+    const notes = [inv.matched ? `✓ Payment found on the bank statement (${fmtDate(inv.matched)})` : '', ...inv.notes].filter(Boolean);
+    return `<tr class="${inv.include ? '' : 'sales-excluded'}">
+      ${first ? `<td rowspan="${span}" style="text-align:center;"><input type="checkbox" ${inv.include ? 'checked' : ''} onchange="toggleSalesInclude(${inv.id}, this.checked)" title="Include this invoice in the Sales Invoices CSV"></td>
+      <td rowspan="${span}">${esc(inv.number)}</td>
+      <td rowspan="${span}">${esc(fmtDate(inv.date))}</td>
+      <td rowspan="${span}">${esc(inv.customer)}</td>` : ''}
+      <td style="white-space:pre-line;max-width:420px;">${esc(l.desc)}</td>
+      <td class="text-right">${l.amount.toFixed(2)}</td>
+      <td class="text-right">${l.tax.toFixed(2)}</td>
+      <td><select onchange="setSalesLine(${inv.id}, ${i}, 'acc', this.value)">${accOpts(l.acc)}</select></td>
+      <td><select onchange="setSalesLine(${inv.id}, ${i}, 'vat', this.value)">${vatOpts(l.vat)}</select></td>
+      ${first ? `<td rowspan="${span}" class="text-right" style="font-weight:500;">${inv.total.toFixed(2)}</td>
+      <td rowspan="${span}" style="font-size:11.5px;color:var(--text-muted);max-width:280px;">${notes.map(esc).join('<br>')}</td>` : ''}
+    </tr>`;
+  }).join('')).join('');
+  const inc = salesInvoices.filter(s => s.include);
+  document.getElementById('salesNote').textContent = `${inc.length} of ${salesInvoices.length} invoice${salesInvoices.length !== 1 ? 's' : ''} will be exported — net ${gbpText(inc.reduce((s, x) => s + x.net, 0))}, VAT ${gbpText(inc.reduce((s, x) => s + x.vat, 0))}, total ${gbpText(inc.reduce((s, x) => s + x.total, 0))}.`;
+  document.getElementById('salesExportBtn').disabled = !inc.length;
+}
+
+function toggleSalesInclude(id, on) {
+  const inv = salesInvoices.find(s => s.id === id);
+  if (inv) { inv.include = on; renderSalesTable(); }
+}
+
+function setSalesLine(id, i, field, value) {
+  const inv = salesInvoices.find(s => s.id === id);
+  if (!inv || !inv.lines[i]) return;
+  inv.lines[i][field] = value;
+  // An account changed on one line usually applies to the whole invoice.
+  if (field === 'acc') inv.lines.forEach(l => { if (!l.acc || l === inv.lines[i]) l.acc = value; });
+}
+
+function buildSalesCSVData() {
+  // Xero Sales Invoices import (Business → Invoices → Import). Amounts are
+  // before VAT: choose "Tax exclusive" when importing.
+  const headers = ['*ContactName', '*InvoiceNumber', '*InvoiceDate', '*DueDate', '*Description', '*Quantity', '*UnitAmount', '*AccountCode', '*TaxType', 'TaxAmount'];
+  const lines = [headers.join(',')];
+  salesInvoices.filter(s => s.include).forEach(inv => {
+    inv.lines.forEach(l => {
+      lines.push([csvEsc(inv.customer), csvEsc(inv.number), fmtDate(inv.date), fmtDate(inv.date), csvEsc(l.desc), '1', l.amount.toFixed(2),
+        (l.acc || '').split(' - ')[0], csvEsc(l.vat), l.tax.toFixed(2)].join(','));
+    });
+  });
+  return { content: lines.join('\r\n'), count: salesInvoices.filter(s => s.include).length, fname: `xero_sales_invoices_${new Date().toISOString().slice(0, 10)}.csv` };
+}
+
+async function exportSalesCSV() {
+  const missing = salesInvoices.filter(s => s.include && s.lines.some(l => !l.acc));
+  if (missing.length) { setAlert(`Choose an account for invoice${missing.length !== 1 ? 's' : ''} ${missing.map(s => s.number).join(', ')} first.`, 'warn'); return; }
+  const data = buildSalesCSVData();
+  const ok = await triggerDownload(data.content, data.fname);
+  if (!ok) return;
+  // Remember what's gone to Xero, so the same invoice isn't exported again.
+  const today = new Date().toISOString().slice(0, 10);
+  salesInvoices.filter(s => s.include).forEach(s => { currentSalesExported[invoiceKey(s.number)] = today; });
+  scheduleSaveClientDoc();
+  setAlert(`✓ Exported ${data.count} sales invoice${data.count !== 1 ? 's' : ''} to ${data.fname}. In Xero: Business → Invoices → Import, and choose "Tax exclusive". Their payments on the bank statement are left uncoded — match them to these invoices when reconciling.`, 'success');
+}
+
 // ── FREE-FORM CLIENT DOCUMENTS (.odt / .docx / .txt) ────────────────────────
 // A client's own notes or year summary — e.g. a table of monthly takings with
 // costs typed into the cells ("Fuel k2 additive £6.99 x2", "Public
@@ -4291,6 +4763,18 @@ async function processUnifiedQueue() {
         }
       } else if (kind === 'msg') {
         item.addedCount = await parseMsgFile(item.file);
+      } else if (kind === 'eml') {
+        const text = await readEmlText(item.file);
+        if (!text) throw new Error('No email text found in this file.');
+        if (looksLikeInvoices(text)) {
+          const result = await parseSalesInvoicesText(text, item.file.name, (msg) => { statusEl.textContent = msg; });
+          item.addedCount = result.added;
+          item.info = result.info || null;
+          item.warning = result.warning || null;
+        } else {
+          document.getElementById('emailPasteBox').value = text;
+          item.addedCount = await parseEmail();
+        }
       } else if (kind === 'pdf' && (pdfStatement = await readPdfStatement(item.file).catch(() => null))) {
         // A bank statement PDF with real text columns — read line by line.
         const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, pdfStatement.stmt);
@@ -4321,7 +4805,7 @@ async function processUnifiedQueue() {
         // A statement carries income, which only the Bank Statement CSV can hold.
         if (result.added) setExportType('bank');
       } else {
-        throw new Error('Unsupported file type — use .xlsx, .msg, .pdf, .png, .jpg, .csv, .odt, .docx or .txt');
+        throw new Error('Unsupported file type — use .xlsx, .msg, .eml, .pdf, .png, .jpg, .csv, .odt, .docx or .txt');
       }
       item.status = 'done';
       if (item.hash) importedFileHashes.set(item.hash, { name: item.file.name, addedCount: item.addedCount });
@@ -4335,6 +4819,9 @@ async function processUnifiedQueue() {
   }
   showTable();
   checkHomeRows();
+  // Bank payments for sales invoices, whichever file came first.
+  matchSalesReceipts();
+  renderSalesTable();
   statusEl.textContent = `Done — processed ${done} file${done!==1?'s':''}.`;
   return toProcess.filter(q => q.status === 'failed' || q.warning).length;
 }
@@ -4627,12 +5114,18 @@ function mergeSelectedRows() {
   checkHomeRows();
 }
 
+// A blank account or VAT needs filling in — except a payment for a sales
+// invoice, which is left uncoded on purpose (see matchSalesReceipts).
+function rowNeedsAttention(r) {
+  return (!r.acc || !r.vat) && !r.salesMatch;
+}
+
 function renderRow(row) {
   const tbody = document.getElementById('expBody');
   const tr = document.createElement('tr');
   tr.id = 'tr_' + row.id;
   if (row.fromBank && row.direction === 'in') tr.classList.add('income-row');
-  if (!row.acc || !row.vat) tr.classList.add('needs-attention');
+  if (rowNeedsAttention(row)) tr.classList.add('needs-attention');
   tr.innerHTML = buildRowHTML(row);
   tbody.appendChild(tr);
 }
@@ -5203,6 +5696,8 @@ function requestClearAll() {
 
 function clearAll() {
   rows = []; nextId = 0;
+  salesInvoices = [];
+  renderSalesTable();
   document.getElementById('expBody').innerHTML = '';
   document.getElementById('expTable').style.display = 'none';
   document.getElementById('emptyState').style.display = 'block';
