@@ -4220,14 +4220,17 @@ const PDF_IN_RE = /^(in|paid in|money in|credits?|receipts|deposits?)(\s*\(?£\)
 const PDF_OUT_RE = /^(out|paid out|money out|debits?|payments|withdrawals?)(\s*\(?£\)?)?$/i;
 const MONTHS3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
 
-function pdfDateToISO(text, fallbackYear) {
+// A date without a year ("14 Jun", as on card statements) takes the
+// statement's year — or the year before for a month after the statement's
+// (December lines on a January statement).
+function pdfDateToISO(text, fallbackYear, statementMonth) {
   const m = String(text || '').trim().match(PDF_DATE_RE);
   if (!m) return null;
   let d, mo, y;
   if (m[1]) { d = +m[1]; mo = +m[2]; y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; }
   else {
     d = +m[4]; mo = MONTHS3.indexOf(m[5].slice(0, 3).toLowerCase()) + 1;
-    y = m[6] ? (m[6].length === 2 ? 2000 + +m[6] : +m[6]) : fallbackYear;
+    y = m[6] ? (m[6].length === 2 ? 2000 + +m[6] : +m[6]) : (statementMonth && mo > statementMonth ? fallbackYear - 1 : fallbackYear);
   }
   if (!mo || !y || !validDayMonth(d, mo)) return null;
   return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -4245,16 +4248,28 @@ function pdfMoney(s) {
 function findPdfStatementHeader(lines) {
   for (let i = 0; i < lines.length; i++) {
     const items = lines[i].items;
-    const date = items.find(it => /^date$/i.test(it.s));
+    let date = items.find(it => /^date$/i.test(it.s));
     const inn = items.find(it => PDF_IN_RE.test(it.s));
     const out = items.find(it => PDF_OUT_RE.test(it.s));
-    if (!date || !inn || !out) continue;
+    if (!inn || !out) continue;
+    // No "Date" heading (e.g. Capital One's "Your transaction details |
+    // Paid in | Paid out"): the dates are the first thing on the lines
+    // below, and the text columns are worked out from those lines.
+    let inferText = false;
+    if (!date) {
+      const firstDated = lines.slice(i + 1, i + 8).map(l => l.items[0]).find(it => it && PDF_DATE_RE.test(it.s.trim()));
+      if (!firstDated) continue;
+      date = { x: firstDated.x, s: '' };
+      inferText = true;
+    }
     const near = lines.filter(l => Math.abs(l.y - lines[i].y) <= 16).flatMap(l => l.items);
     const bal = near.find(it => /^balance$/i.test(it.s)) || near.find(it => /balance/i.test(it.s));
     const firstMoney = Math.min(inn.x, out.x);
-    const text = items.filter(it => it !== date && it.x > date.x && it.right < firstMoney - 2).map(it => ({ name: it.s, x: it.x }));
+    const text = inferText ? [] : items.filter(it => it !== date && it.x > date.x && it.right < firstMoney - 2).map(it => ({ name: it.s, x: it.x }));
     return {
       index: i,
+      inferText,
+      firstMoneyX: firstMoney,
       dateX: date.x,
       cols: [{ key: 'in', right: inn.right }, { key: 'out', right: out.right }, ...(bal ? [{ key: 'balance', right: bal.right }] : [])],
       text,
@@ -4266,26 +4281,75 @@ function findPdfStatementHeader(lines) {
 
 // Reads a statement PDF into { stmt, info, warning }, or null if it isn't a
 // text statement with recognisable columns (e.g. a receipt or a scan).
+// Lines that are the statement's own totals or balances, not transactions.
+const PDF_TOTAL_LINE_RE = /^(statement totals?|previous balance|new (closing )?balance|(opening|closing) balance|balance (brought|carried) forward|brought forward|carried forward)\b/i;
+
+// Text columns without headings: where the words on the dated lines start
+// (e.g. merchant at one position, "Guildford on 15 Jun" at another).
+function inferPdfTextColumns(lines, hdr, fallbackYear, statementMonth) {
+  const dated = lines.slice(hdr.index + 1).filter(l => l.items[0] && l.items[0].x < hdr.dateX + 20 && pdfDateToISO(l.items[0].s, fallbackYear, statementMonth)).slice(0, 80);
+  const starts = [];
+  dated.forEach(l => {
+    const seen = new Set();
+    l.items.slice(1).forEach(it => {
+      if (PDF_MONEY_RE.test(it.s) || it.x >= hdr.firstMoneyX - 2) return;
+      let c = starts.find(s => Math.abs(s.x - it.x) <= 6);
+      if (!c) { c = { x: it.x, lines: 0 }; starts.push(c); }
+      if (!seen.has(c)) { c.lines++; seen.add(c); }
+    });
+  });
+  const cols = starts.filter(c => c.lines >= Math.max(1, dated.length * 0.25)).sort((a, b) => a.x - b.x);
+  if (!cols.length) return [{ name: 'Description', x: hdr.dateX + 40 }];
+  return cols.map((c, i) => ({ name: i === 0 ? 'Description' : i === 1 ? 'Details' : `Details ${i}`, x: c.x }));
+}
+
 async function readPdfStatement(file) {
   const pages = await readPdfTextLines(file);
   const allText = pages.flat().map(l => l.items.map(i => i.s).join(' ')).join('\n');
   if (!allText.trim()) return null;
   const years = (allText.match(/\b20\d{2}\b/g) || []).map(Number);
-  const fallbackYear = years.length ? Math.max(...years) : new Date().getFullYear();
+  let fallbackYear = years.length ? Math.max(...years) : new Date().getFullYear();
+  // The statement's own date, for dates printed without a year.
+  let statementMonth = null;
+  for (const l of pages.flat()) {
+    const k = l.items.findIndex(it => /^statement date$/i.test(it.s));
+    if (k < 0) continue;
+    const d = l.items.slice(k + 1).map(it => pdfDateToISO(it.s, fallbackYear)).find(Boolean);
+    if (d) { fallbackYear = +d.slice(0, 4); statementMonth = +d.slice(5, 7); break; }
+  }
 
   let hdr = null;
   const rows = [];
+  let printedTotals = null;
   for (const lines of pages) {
     let start = 0;
     const own = findPdfStatementHeader(lines);
-    if (own) { hdr = own; start = own.index + 1; }
+    if (own) {
+      if (own.inferText) own.text = inferPdfTextColumns(lines, own, fallbackYear, statementMonth);
+      hdr = own; start = own.index + 1;
+    }
     if (!hdr) continue;
     const textCols = hdr.text.length ? hdr.text : [{ name: 'Description', x: hdr.dateX + 40 }];
     let prev = null;
     for (const line of lines.slice(start)) {
       const items = line.items;
       const first = items[0];
-      const iso = first && first.x < hdr.dateX + 20 ? pdfDateToISO(first.s, fallbackYear) : null;
+      const iso = first && first.x < hdr.dateX + 20 ? pdfDateToISO(first.s, fallbackYear, statementMonth) : null;
+      // The statement's own totals line (kept for the check below) and
+      // balance lines are not transactions.
+      const label = items.filter(it => !(iso && it === first) && !PDF_MONEY_RE.test(it.s)).map(it => it.s).join(' ').trim();
+      if (PDF_TOTAL_LINE_RE.test(label)) {
+        if (/^statement totals?\b/i.test(label)) {
+          const t = {};
+          items.filter(it => PDF_MONEY_RE.test(it.s)).forEach(it => {
+            const col = hdr.cols.reduce((best, c) => Math.abs(c.right - it.right) < Math.abs(best.right - it.right) ? c : best);
+            t[col.key] = pdfMoney(it.s);
+          });
+          if (t.in !== undefined || t.out !== undefined) printedTotals = { in: t.in || 0, out: t.out || 0 };
+        }
+        prev = null;
+        continue;
+      }
       const money = items.filter(it => it !== first || !iso).filter(it => PDF_MONEY_RE.test(it.s) && it.x > (textCols[textCols.length - 1].x));
       const words = items.filter(it => !(iso && it === first) && !money.includes(it));
       const amounts = {};
@@ -4344,8 +4408,9 @@ async function readPdfStatement(file) {
     }
     return null;
   };
-  const stIn = labelled(/^(payments in|money in|total (money )?in|total paid in|paid in|total deposits|total credits|total receipts)$/i);
-  const stOut = labelled(/^(payments out|money out|total (money )?out|total paid out|paid out|total withdrawals|total debits|total payments)$/i);
+  let stIn = labelled(/^(payments in|money in|total (money )?in|total paid in|paid in|total deposits|total credits|total receipts|payments received)$/i);
+  let stOut = labelled(/^(payments out|money out|total (money )?out|total paid out|paid out|total withdrawals|total debits|total payments|new transactions)$/i);
+  if (printedTotals) { stIn = printedTotals.in; stOut = printedTotals.out; }
   const gbp = v => `£${v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const close = (a, b) => Math.abs(a - b) < 0.005;
   let info = '', warning = '';
