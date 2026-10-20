@@ -766,7 +766,7 @@
   <div id="clearConfirmBox" style="margin-bottom:16px;"></div>
 
   <!-- STEP 2: ADD EXPENSES -->
-  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin-bottom:10px;">② Add Expenses</h3>
+  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin-bottom:10px;">② Add client documents</h3>
 
   <!-- UNIFIED UPLOAD -->
   <div class="email-paste-bar" id="uploadBar" style="margin-top:0;">
@@ -779,6 +779,7 @@
       e.g. to 980 Personal Use Adjustments, before exporting</strong>. Each file
       <strong>adds</strong> to the rows below rather than clearing what's already there, so a client who sends a separate file
       per month (e.g. three months of bank statements) can just have all of them dropped in together, or added one at a time as they arrive.
+      More documents can be added at any time — drop them here, or use <strong>＋ Add more documents</strong> above the rows.
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
@@ -876,8 +877,14 @@
   <!-- TABLE -->
   <div class="table-header">
     <h3>EXTRACTED ROWS</h3>
-    <span class="row-count" id="rowCount">0 rows</span>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+      <span class="row-count" id="rowCount">0 rows</span>
+      <button class="btn" type="button" id="addMoreBtn" onclick="addMoreDocuments(false)" style="display:none;" title="Read more documents and add their rows to the ones below — nothing here is cleared">＋ Add more documents</button>
+      <button class="btn" type="button" id="clearAddBtn" onclick="addMoreDocuments(true)" style="display:none;" title="Clear the rows below and read new documents for the same client — the client's chart of accounts, coding and settings are kept">↺ Clear rows and add new documents</button>
+      <input type="file" id="addMoreInput" accept=".xlsx,.xls,.msg,.eml,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple style="display:none;">
+    </div>
   </div>
+  <div id="addMoreBox"></div>
 
   <div class="table-wrap" id="tableWrap">
     <div class="empty-state" id="emptyState">
@@ -1684,6 +1691,139 @@ async function extractTextFromXeroExport(file) {
 // ~2 KB instruction block rather than right up against the limit.
 const XERO_EXPORT_TEXT_LIMIT = 55000; // enough for a year of transactions on most clients
 
+// ── XERO ACCOUNT TRANSACTIONS, READ DIRECTLY ────────────────────────────────
+// Xero's Account Transactions report has a fixed layout: a heading row per
+// account, then its lines (Date, Source, Contact, Description, …, Gross,
+// VAT Rate Name, Account Code, Account Type). Reading it here takes a
+// moment and needs no Claude call:
+//  - the chart of accounts: each profit-and-loss account used, with the VAT
+//    rate it's most often coded at (an export without codes is matched to
+//    the client's chart by account name);
+//  - coding history: each supplier/customer and the account its spending
+//    or money received goes to (one used for several kinds of cost — the
+//    client's own initials, a cash clearing account — is remembered by
+//    description instead); for accounts kept only as year-end journals,
+//    one entry per kind of cost;
+//  - last year's business-use adjustments: journals reducing a cost account
+//    (e.g. "Use of Home adjustments - 1 of 3 rooms").
+// Returns null if the text isn't such a report.
+function xeroDateValue(t) {
+  const s = String(t || '').trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) return new Date(+(m[3].length === 2 ? '20' + m[3] : m[3]), +m[2] - 1, +m[1]).getTime();
+  const v = Date.parse(s);
+  return isNaN(v) ? 0 : v;
+}
+
+function readXeroAccountTransactions(text) {
+  const rows = parseCsvText(text);
+  const norm = c => String(c || '').replace(/[*\s]/g, '').toLowerCase();
+  const h = rows.findIndex(r => { const n = r.map(norm); return n.includes('date') && n.includes('source') && (n.includes('gross') || n.includes('debit')); });
+  if (h < 0) return null;
+  const head = rows[h].map(norm);
+  const c = n => head.indexOf(n);
+  const col = {
+    date: c('date'), source: c('source'), contact: c('contact'), desc: c('description'),
+    gross: c('gross'), debit: c('debit'), credit: c('credit'), code: c('accountcode'), type: c('accounttype'),
+    vat: head.findIndex(x => x === 'vatratename' || x === 'taxratename'),
+  };
+  const plType = /^(expense|expenses|revenue|directcosts|overhead|overheads|sales|otherincome|depreciation)$/;
+  const known = name => ACCOUNTS.find(a => !isStandardAccount(a.code) && a.name.trim().toLowerCase() === String(name || '').trim().toLowerCase());
+  const tx = [];
+  let heading = null;
+  for (const r of rows.slice(h + 1)) {
+    const cells = r.map(x => String(x ?? '').trim());
+    const filled = cells.filter(Boolean);
+    if (!filled.length) continue;
+    if (cells[0] && filled.length === 1) { heading = /^total\b/i.test(cells[0]) ? null : cells[0]; continue; }
+    if (!heading || /^total\b/i.test(cells[0])) continue;
+    const source = col.source >= 0 ? cells[col.source] : '';
+    if (!source) continue;
+    const type = col.type >= 0 ? norm(cells[col.type]) : '';
+    let code = col.code >= 0 ? cells[col.code] : '';
+    let name = heading;
+    const k = known(heading);
+    if (!code) { if (!k) continue; code = k.code; name = k.name; }
+    // Profit and loss accounts only — not the bank, VAT or balance sheet.
+    if (type ? !plType.test(type) : !(k || (/^\d+$/.test(code) && Number(code) < 600))) continue;
+    if (/flat rate adjustment/i.test(name)) continue;
+    const gross = col.gross >= 0 ? parseAmount(cells[col.gross]) : (parseAmount(cells[col.debit]) || 0) - (parseAmount(cells[col.credit]) || 0);
+    tx.push({
+      name, code, type, source,
+      contact: col.contact >= 0 ? cells[col.contact].replace(/\s+/g, ' ') : '',
+      desc: col.desc >= 0 ? cells[col.desc].replace(/\s+/g, ' ').trim() : '',
+      gross, vat: col.vat >= 0 ? cells[col.vat] : '', date: xeroDateValue(cells[col.date]),
+    });
+  }
+  if (!tx.length) return null;
+
+  // Chart of accounts and each account's usual VAT rate.
+  const accounts = [], vatCount = {};
+  tx.forEach(t => {
+    if (!accounts.some(a => a.code === t.code)) accounts.push({ code: t.code, name: t.name });
+    if (VAT_RATES.includes(t.vat)) { vatCount[t.code] ||= {}; vatCount[t.code][t.vat] = (vatCount[t.code][t.vat] || 0) + 1; }
+  });
+  const vatDefaults = {};
+  Object.entries(vatCount).forEach(([code, counts]) => { vatDefaults[code] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]; });
+  const vatFor = t => VAT_RATES.includes(t.vat) ? t.vat : (vatDefaults[t.code] || VAT_DEFAULTS[t.code] || '');
+  const accFull = t => `${t.code} - ${t.name}`;
+
+  // Business-use adjustments: journals reducing a cost account (not a
+  // reclassification that moves the same amount to another account).
+  const journals = tx.filter(t => /manual journal/i.test(t.source));
+  const isIncome = t => /revenue|sales|income|turnover/.test(t.type) || /revenue|sales|income|turnover/i.test(t.name);
+  const stripDup = d => { const p = d.split(' - '); return p.length > 1 && p.slice(1).join(' - ').toLowerCase().startsWith(p[0].toLowerCase()) ? p.slice(1).join(' - ') : d; };
+  const adjustments = journals
+    .filter(t => !isIncome(t) && t.gross < 0 && !/WDA|WDV|capital allowance|VAT|flat rate/i.test(t.desc)
+      && !journals.some(o => o !== t && o.desc === t.desc && Math.abs(o.gross + t.gross) < 0.005))
+    .map(t => ({ account: t.name, description: stripDup(t.desc), amount: Math.round(t.gross * 100) / 100 }));
+
+  // Coding history from ordinary transactions.
+  const rules = [];
+  const ordinary = tx.filter(t => !/manual journal/i.test(t.source)).sort((a, b) => a.date - b.date);
+  const split = t => {
+    if (t.contact) return { contact: t.contact, own: t.desc.toLowerCase().startsWith(t.contact.toLowerCase() + ' - ') ? t.desc.slice(t.contact.length + 3).trim() : t.desc };
+    const i = t.desc.indexOf(' - ');
+    return i > 0 ? { contact: t.desc.slice(0, i).trim(), own: t.desc.slice(i + 3).trim() } : { contact: t.desc, own: t.desc };
+  };
+  const codesBy = {};
+  ordinary.forEach(t => { const s = split(t).contact.toLowerCase(); if (s) (codesBy[s] ||= new Set()).add(t.code); });
+  const mixedSuppliers = Object.keys(codesBy).filter(s => codesBy[s].size > 1);
+  const groups = new Set();
+  ordinary.forEach(t => {
+    const { contact, own } = split(t);
+    const vat = vatFor(t);
+    if (!vat) return;
+    const s = contact.toLowerCase();
+    if (s && codesBy[s].size === 1 && !isBookkeepingEntry(s)) {
+      rules.push({ supplier: contact, desc: own, acc: accFull(t), vat, note: (own || '').slice(0, 80) });
+    } else {
+      if (!own || isBookkeepingEntry(own)) return;
+      const g = own.toLowerCase().replace(/\d+(\.\d+)?/g, '#') + '|' + t.code;
+      if (groups.has(g)) return;
+      groups.add(g);
+      rules.push({ supplier: '', desc: own, acc: accFull(t), vat, note: own.slice(0, 80) });
+    }
+  });
+  // Accounts kept only as year-end journals: one entry per kind of cost.
+  const used = new Set(ordinary.map(t => t.code));
+  const seenKinds = new Set();
+  journals.forEach(t => {
+    if (used.has(t.code) || t.gross < 0 || /WDA|WDV|capital allowance|balancing|VAT return|flat rate/i.test(t.desc)) return;
+    let kind = t.desc.includes(' - ') ? t.desc.slice(t.desc.indexOf(' - ') + 3).trim() : t.desc;
+    if (/^(january|february|march|maech|april|may|june|july|august|september|october|november|december)$/i.test(kind)) kind = t.name;
+    kind = kind.replace(/\s*[£(].*$/, '').trim() || t.name;
+    const vat = vatFor(t);
+    if (!vat || seenKinds.has(kind.toLowerCase())) return;
+    seenKinds.add(kind.toLowerCase());
+    rules.push({ supplier: '', desc: kind, acc: accFull(t), vat, note: kind.slice(0, 80) });
+  });
+  // One rule per supplier / description: the most recent coding wins.
+  const unique = new Map();
+  rules.forEach(r => { const k = ruleKeyFor(r.supplier, r.desc); if (k) unique.set(k, r); });
+  return { accounts, vatDefaults, rules: [...unique.values()], adjustments, mixedSuppliers, lines: tx.length };
+}
+
 // Xero's own Chart of Accounts export (Accounting → Chart of accounts →
 // Export): "*Code, Report Code, *Name, …, *Type, *Tax Code, …". Read
 // directly — no need to ask Claude. Only the accounts used to code costs
@@ -1981,6 +2121,22 @@ async function processXeroExportQueue() {
         renderXeroExportFileList();
         continue;
       }
+      // Xero's Account Transactions report: read directly, no Claude call.
+      const direct = readXeroAccountTransactions(fullText);
+      if (direct) {
+        mergeIntoCoa(direct.accounts, direct.vatDefaults);
+        direct.mixedSuppliers.forEach(sup => { if (!(currentClientRules['supplier:' + sup] || {}).user) delete currentClientRules['supplier:' + sup]; });
+        direct.rules.forEach(r => recordClientRule(r.supplier, r.desc, r.acc, r.vat, r.note));
+        direct.adjustments.forEach(a => {
+          if (!adjustments.some(x => x.account.toLowerCase() === a.account.toLowerCase() && x.description.toLowerCase() === a.description.toLowerCase())) adjustments.push(a);
+        });
+        totalRules += direct.rules.length;
+        anyRead = true;
+        item.status = 'done';
+        item.error = null;
+        renderXeroExportFileList();
+        continue;
+      }
       // A full year of transactions can easily be 100KB+ of CSV text, well
       // over the 64 KiB-total prompt cap the published page's `sample`
       // capability allows in one call — so rather than silently dropping
@@ -2001,9 +2157,22 @@ async function processXeroExportQueue() {
       // cash clearing account) → those rules are kept by description, so
       // "MT - Michael's work" and "MT - water" don't overwrite each other.
       const supplierAccounts = {};
+      // Parts are read two at a time, then used in order.
+      const replies = new Array(chunks.length);
+      let nextPart = 0, partsDone = 0;
+      const showParts = () => { statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (${partsDone} of ${chunks.length} parts done)` : ''}…`; };
+      showParts();
+      const errors = [];
+      await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => {
+        while (nextPart < chunks.length) {
+          const i = nextPart++;
+          try { replies[i] = await callXeroFileExtraction(chunks[i]); } catch (e) { errors.push(e); }
+          partsDone++; showParts();
+        }
+      }));
+      if (errors.length) throw errors[0];
       for (let i = 0; i < chunks.length; i++) {
-        statusEl.textContent = `Analysing ${item.file.name}${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}…`;
-        const reply = await callXeroFileExtraction(chunks[i]);
+        const reply = replies[i];
         const { adjustments: adj } = reply;
         // Accounts already known (e.g. from a chart of accounts file) keep
         // their own codes, matched by name.
@@ -4051,14 +4220,17 @@ const PDF_IN_RE = /^(in|paid in|money in|credits?|receipts|deposits?)(\s*\(?£\)
 const PDF_OUT_RE = /^(out|paid out|money out|debits?|payments|withdrawals?)(\s*\(?£\)?)?$/i;
 const MONTHS3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
 
-function pdfDateToISO(text, fallbackYear) {
+// A date without a year ("14 Jun", as on card statements) takes the
+// statement's year — or the year before for a month after the statement's
+// (December lines on a January statement).
+function pdfDateToISO(text, fallbackYear, statementMonth) {
   const m = String(text || '').trim().match(PDF_DATE_RE);
   if (!m) return null;
   let d, mo, y;
   if (m[1]) { d = +m[1]; mo = +m[2]; y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; }
   else {
     d = +m[4]; mo = MONTHS3.indexOf(m[5].slice(0, 3).toLowerCase()) + 1;
-    y = m[6] ? (m[6].length === 2 ? 2000 + +m[6] : +m[6]) : fallbackYear;
+    y = m[6] ? (m[6].length === 2 ? 2000 + +m[6] : +m[6]) : (statementMonth && mo > statementMonth ? fallbackYear - 1 : fallbackYear);
   }
   if (!mo || !y || !validDayMonth(d, mo)) return null;
   return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -4076,16 +4248,28 @@ function pdfMoney(s) {
 function findPdfStatementHeader(lines) {
   for (let i = 0; i < lines.length; i++) {
     const items = lines[i].items;
-    const date = items.find(it => /^date$/i.test(it.s));
+    let date = items.find(it => /^date$/i.test(it.s));
     const inn = items.find(it => PDF_IN_RE.test(it.s));
     const out = items.find(it => PDF_OUT_RE.test(it.s));
-    if (!date || !inn || !out) continue;
+    if (!inn || !out) continue;
+    // No "Date" heading (e.g. Capital One's "Your transaction details |
+    // Paid in | Paid out"): the dates are the first thing on the lines
+    // below, and the text columns are worked out from those lines.
+    let inferText = false;
+    if (!date) {
+      const firstDated = lines.slice(i + 1, i + 8).map(l => l.items[0]).find(it => it && PDF_DATE_RE.test(it.s.trim()));
+      if (!firstDated) continue;
+      date = { x: firstDated.x, s: '' };
+      inferText = true;
+    }
     const near = lines.filter(l => Math.abs(l.y - lines[i].y) <= 16).flatMap(l => l.items);
     const bal = near.find(it => /^balance$/i.test(it.s)) || near.find(it => /balance/i.test(it.s));
     const firstMoney = Math.min(inn.x, out.x);
-    const text = items.filter(it => it !== date && it.x > date.x && it.right < firstMoney - 2).map(it => ({ name: it.s, x: it.x }));
+    const text = inferText ? [] : items.filter(it => it !== date && it.x > date.x && it.right < firstMoney - 2).map(it => ({ name: it.s, x: it.x }));
     return {
       index: i,
+      inferText,
+      firstMoneyX: firstMoney,
       dateX: date.x,
       cols: [{ key: 'in', right: inn.right }, { key: 'out', right: out.right }, ...(bal ? [{ key: 'balance', right: bal.right }] : [])],
       text,
@@ -4097,26 +4281,75 @@ function findPdfStatementHeader(lines) {
 
 // Reads a statement PDF into { stmt, info, warning }, or null if it isn't a
 // text statement with recognisable columns (e.g. a receipt or a scan).
+// Lines that are the statement's own totals or balances, not transactions.
+const PDF_TOTAL_LINE_RE = /^(statement totals?|previous balance|new (closing )?balance|(opening|closing) balance|balance (brought|carried) forward|brought forward|carried forward)\b/i;
+
+// Text columns without headings: where the words on the dated lines start
+// (e.g. merchant at one position, "Guildford on 15 Jun" at another).
+function inferPdfTextColumns(lines, hdr, fallbackYear, statementMonth) {
+  const dated = lines.slice(hdr.index + 1).filter(l => l.items[0] && l.items[0].x < hdr.dateX + 20 && pdfDateToISO(l.items[0].s, fallbackYear, statementMonth)).slice(0, 80);
+  const starts = [];
+  dated.forEach(l => {
+    const seen = new Set();
+    l.items.slice(1).forEach(it => {
+      if (PDF_MONEY_RE.test(it.s) || it.x >= hdr.firstMoneyX - 2) return;
+      let c = starts.find(s => Math.abs(s.x - it.x) <= 6);
+      if (!c) { c = { x: it.x, lines: 0 }; starts.push(c); }
+      if (!seen.has(c)) { c.lines++; seen.add(c); }
+    });
+  });
+  const cols = starts.filter(c => c.lines >= Math.max(1, dated.length * 0.25)).sort((a, b) => a.x - b.x);
+  if (!cols.length) return [{ name: 'Description', x: hdr.dateX + 40 }];
+  return cols.map((c, i) => ({ name: i === 0 ? 'Description' : i === 1 ? 'Details' : `Details ${i}`, x: c.x }));
+}
+
 async function readPdfStatement(file) {
   const pages = await readPdfTextLines(file);
   const allText = pages.flat().map(l => l.items.map(i => i.s).join(' ')).join('\n');
   if (!allText.trim()) return null;
   const years = (allText.match(/\b20\d{2}\b/g) || []).map(Number);
-  const fallbackYear = years.length ? Math.max(...years) : new Date().getFullYear();
+  let fallbackYear = years.length ? Math.max(...years) : new Date().getFullYear();
+  // The statement's own date, for dates printed without a year.
+  let statementMonth = null;
+  for (const l of pages.flat()) {
+    const k = l.items.findIndex(it => /^statement date$/i.test(it.s));
+    if (k < 0) continue;
+    const d = l.items.slice(k + 1).map(it => pdfDateToISO(it.s, fallbackYear)).find(Boolean);
+    if (d) { fallbackYear = +d.slice(0, 4); statementMonth = +d.slice(5, 7); break; }
+  }
 
   let hdr = null;
   const rows = [];
+  let printedTotals = null;
   for (const lines of pages) {
     let start = 0;
     const own = findPdfStatementHeader(lines);
-    if (own) { hdr = own; start = own.index + 1; }
+    if (own) {
+      if (own.inferText) own.text = inferPdfTextColumns(lines, own, fallbackYear, statementMonth);
+      hdr = own; start = own.index + 1;
+    }
     if (!hdr) continue;
     const textCols = hdr.text.length ? hdr.text : [{ name: 'Description', x: hdr.dateX + 40 }];
     let prev = null;
     for (const line of lines.slice(start)) {
       const items = line.items;
       const first = items[0];
-      const iso = first && first.x < hdr.dateX + 20 ? pdfDateToISO(first.s, fallbackYear) : null;
+      const iso = first && first.x < hdr.dateX + 20 ? pdfDateToISO(first.s, fallbackYear, statementMonth) : null;
+      // The statement's own totals line (kept for the check below) and
+      // balance lines are not transactions.
+      const label = items.filter(it => !(iso && it === first) && !PDF_MONEY_RE.test(it.s)).map(it => it.s).join(' ').trim();
+      if (PDF_TOTAL_LINE_RE.test(label)) {
+        if (/^statement totals?\b/i.test(label)) {
+          const t = {};
+          items.filter(it => PDF_MONEY_RE.test(it.s)).forEach(it => {
+            const col = hdr.cols.reduce((best, c) => Math.abs(c.right - it.right) < Math.abs(best.right - it.right) ? c : best);
+            t[col.key] = pdfMoney(it.s);
+          });
+          if (t.in !== undefined || t.out !== undefined) printedTotals = { in: t.in || 0, out: t.out || 0 };
+        }
+        prev = null;
+        continue;
+      }
       const money = items.filter(it => it !== first || !iso).filter(it => PDF_MONEY_RE.test(it.s) && it.x > (textCols[textCols.length - 1].x));
       const words = items.filter(it => !(iso && it === first) && !money.includes(it));
       const amounts = {};
@@ -4175,8 +4408,9 @@ async function readPdfStatement(file) {
     }
     return null;
   };
-  const stIn = labelled(/^(payments in|money in|total (money )?in|total paid in|paid in|total deposits|total credits|total receipts)$/i);
-  const stOut = labelled(/^(payments out|money out|total (money )?out|total paid out|paid out|total withdrawals|total debits|total payments)$/i);
+  let stIn = labelled(/^(payments in|money in|total (money )?in|total paid in|paid in|total deposits|total credits|total receipts|payments received)$/i);
+  let stOut = labelled(/^(payments out|money out|total (money )?out|total paid out|paid out|total withdrawals|total debits|total payments|new transactions)$/i);
+  if (printedTotals) { stIn = printedTotals.in; stOut = printedTotals.out; }
   const gbp = v => `£${v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const close = (a, b) => Math.abs(a - b) < 0.005;
   let info = '', warning = '';
@@ -4548,6 +4782,7 @@ function renderSalesTable() {
   const section = document.getElementById('salesSection');
   if (!section) return;
   section.style.display = salesInvoices.length ? 'block' : 'none';
+  updateAddMoreButtons();
   const body = document.getElementById('salesBody');
   const accOpts = sel => ACCOUNTS.map(a => `${a.code} - ${a.name}`).map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('') + (sel && !ACCOUNTS.some(a => `${a.code} - ${a.name}` === sel) ? `<option selected>${esc(sel)}</option>` : '') + (!sel ? '<option value="" selected>— choose —</option>' : '');
   const vatOpts = sel => VAT_RATES.map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('');
@@ -5699,7 +5934,8 @@ function refreshRefPlaceholders() {
   rows.forEach(r => {
     const inp = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
     if (!inp) return;
-    if (r.post !== 'YES') { inp.placeholder = 'Ref'; return; }
+    // Only a Bills export makes up a reference; bank lines keep their own.
+    if (r.post !== 'YES' || exportType === 'bank') { inp.placeholder = exportType === 'bank' ? '' : 'Ref'; return; }
     inp.placeholder = `${prefix}-${seq}`;
     seq++;
   });
@@ -5775,6 +6011,7 @@ function updateUI() {
   document.getElementById('rowCount').textContent = countText;
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
+  updateAddMoreButtons();
 }
 
 function updateSummary() {
@@ -5864,6 +6101,80 @@ function requestClearAll() {
   box.appendChild(wrap);
 }
 
+// ── ADDING MORE DOCUMENTS TO A JOB ──────────────────────────────────────────
+// Next to the Extracted Rows heading: "＋ Add more documents" reads new
+// files straight away and adds their rows to the ones already there;
+// "↺ Clear rows and add new documents" clears the rows (keeping the client's
+// chart, coding and settings) and reads the new files. Files dropped
+// anywhere on the page land in Step ② instead of the browser opening them
+// (which would leave the page and lose the rows).
+let addMoreClearFirst = false;
+function updateAddMoreButtons() {
+  const has = rows.length > 0 || salesInvoices.length > 0;
+  ['addMoreBtn', 'clearAddBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = has ? '' : 'none'; });
+}
+
+function addMoreDocuments(clearFirst) {
+  const box = document.getElementById('addMoreBox');
+  box.innerHTML = '';
+  const pick = () => { addMoreClearFirst = clearFirst; document.getElementById('addMoreInput').click(); };
+  if (!clearFirst) { pick(); return; }
+  // An inline confirmation (a browser confirm() box can be blocked).
+  const n = rows.length;
+  const wrap = document.createElement('div');
+  wrap.className = 'alert alert-warn show';
+  wrap.innerHTML = `<div style="margin-bottom:10px;">Clear the ${n} row${n !== 1 ? 's' : ''} below${salesInvoices.length ? ` and ${salesInvoices.length} sales invoice${salesInvoices.length !== 1 ? 's' : ''}` : ''}, then choose the new documents? ${esc(currentClientKey || 'The client')}'s chart of accounts, coding and settings are kept.</div>`;
+  const yes = document.createElement('button');
+  yes.className = 'btn btn-primary'; yes.style.marginRight = '8px'; yes.type = 'button';
+  yes.textContent = 'Yes — clear the rows and choose documents';
+  yes.onclick = () => { box.innerHTML = ''; pick(); };
+  const no = document.createElement('button');
+  no.className = 'btn'; no.type = 'button'; no.textContent = 'Cancel';
+  no.onclick = () => { box.innerHTML = ''; };
+  wrap.appendChild(yes); wrap.appendChild(no);
+  box.appendChild(wrap);
+}
+
+// Reads the given files now and adds their rows (Step ②'s queue and
+// "Process everything", so duplicates, zips and every file type work the
+// same way).
+async function addDocumentsNow(files) {
+  if (!files.length) return;
+  if (addMoreClearFirst) { addMoreClearFirst = false; clearAll(); }
+  await addFilesToUploadQueue(files);
+  const before = rows.length;
+  setAlert(`Reading ${files.length} more document${files.length !== 1 ? 's' : ''} — their rows are added to the ones below…`, 'info');
+  await processAll();
+  const added = rows.length - before;
+  const status = document.getElementById('processAllStatus').textContent;
+  setAlert(/problem/.test(status) ? `${status} (Step ② shows each file.)` : `✓ ${added} row${added !== 1 ? 's' : ''} added from ${files.length} more document${files.length !== 1 ? 's' : ''}.${uploadQueue.some(q => q.status === 'duplicate') ? ' A file already read was held back as a possible duplicate — see Step ②.' : ''}`, /problem/.test(status) ? 'warn' : 'success');
+}
+
+document.getElementById('addMoreInput').addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  addDocumentsNow(files);
+});
+
+document.addEventListener('dragover', e => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) e.preventDefault();
+});
+document.addEventListener('drop', e => {
+  if (e.defaultPrevented || !e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files);
+  if (rows.length || salesInvoices.length) { addMoreClearFirst = false; addDocumentsNow(files); }
+  else {
+    addFilesToUploadQueue(files);
+    setAlert(`${files.length} file${files.length !== 1 ? 's' : ''} added to Step ② — press "Process everything" when ready.`, 'info');
+  }
+});
+
+// Leaving or reloading the page loses the rows — ask first.
+window.addEventListener('beforeunload', e => {
+  if (rows.length || salesInvoices.length) { e.preventDefault(); e.returnValue = ''; }
+});
+
 function clearAll() {
   rows = []; nextId = 0;
   salesInvoices = [];
@@ -5879,6 +6190,7 @@ function clearAll() {
   importedFileHashes.clear();
   uploadQueue = [];
   renderUploadFileList();
+  updateAddMoreButtons();
   setAlert('All rows cleared. Drop a new file or add rows manually.', 'info');
   refreshExportBtn();
 }
