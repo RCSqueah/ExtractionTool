@@ -766,7 +766,7 @@
   <div id="clearConfirmBox" style="margin-bottom:16px;"></div>
 
   <!-- STEP 2: ADD EXPENSES -->
-  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin-bottom:10px;">② Add Expenses</h3>
+  <h3 style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text-muted);letter-spacing:0.04em;margin-bottom:10px;">② Add client documents</h3>
 
   <!-- UNIFIED UPLOAD -->
   <div class="email-paste-bar" id="uploadBar" style="margin-top:0;">
@@ -779,6 +779,7 @@
       e.g. to 980 Personal Use Adjustments, before exporting</strong>. Each file
       <strong>adds</strong> to the rows below rather than clearing what's already there, so a client who sends a separate file
       per month (e.g. three months of bank statements) can just have all of them dropped in together, or added one at a time as they arrive.
+      More documents can be added at any time — drop them here, or use <strong>＋ Add more documents</strong> above the rows.
       Use "Clear all" above if you want to start over completely.
     </p>
     <div class="drop-zone" id="unifiedDropZone" style="padding:36px;">
@@ -876,8 +877,14 @@
   <!-- TABLE -->
   <div class="table-header">
     <h3>EXTRACTED ROWS</h3>
-    <span class="row-count" id="rowCount">0 rows</span>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+      <span class="row-count" id="rowCount">0 rows</span>
+      <button class="btn" type="button" id="addMoreBtn" onclick="addMoreDocuments(false)" style="display:none;" title="Read more documents and add their rows to the ones below — nothing here is cleared">＋ Add more documents</button>
+      <button class="btn" type="button" id="clearAddBtn" onclick="addMoreDocuments(true)" style="display:none;" title="Clear the rows below and read new documents for the same client — the client's chart of accounts, coding and settings are kept">↺ Clear rows and add new documents</button>
+      <input type="file" id="addMoreInput" accept=".xlsx,.xls,.msg,.eml,.pdf,.png,.jpg,.jpeg,.csv,.odt,.docx,.txt,.zip" multiple style="display:none;">
+    </div>
   </div>
+  <div id="addMoreBox"></div>
 
   <div class="table-wrap" id="tableWrap">
     <div class="empty-state" id="emptyState">
@@ -4548,6 +4555,7 @@ function renderSalesTable() {
   const section = document.getElementById('salesSection');
   if (!section) return;
   section.style.display = salesInvoices.length ? 'block' : 'none';
+  updateAddMoreButtons();
   const body = document.getElementById('salesBody');
   const accOpts = sel => ACCOUNTS.map(a => `${a.code} - ${a.name}`).map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('') + (sel && !ACCOUNTS.some(a => `${a.code} - ${a.name}` === sel) ? `<option selected>${esc(sel)}</option>` : '') + (!sel ? '<option value="" selected>— choose —</option>' : '');
   const vatOpts = sel => VAT_RATES.map(v => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('');
@@ -5699,7 +5707,8 @@ function refreshRefPlaceholders() {
   rows.forEach(r => {
     const inp = document.querySelector(`#tr_${r.id} td:nth-child(4) input`);
     if (!inp) return;
-    if (r.post !== 'YES') { inp.placeholder = 'Ref'; return; }
+    // Only a Bills export makes up a reference; bank lines keep their own.
+    if (r.post !== 'YES' || exportType === 'bank') { inp.placeholder = exportType === 'bank' ? '' : 'Ref'; return; }
     inp.placeholder = `${prefix}-${seq}`;
     seq++;
   });
@@ -5775,6 +5784,7 @@ function updateUI() {
   document.getElementById('rowCount').textContent = countText;
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
+  updateAddMoreButtons();
 }
 
 function updateSummary() {
@@ -5864,6 +5874,80 @@ function requestClearAll() {
   box.appendChild(wrap);
 }
 
+// ── ADDING MORE DOCUMENTS TO A JOB ──────────────────────────────────────────
+// Next to the Extracted Rows heading: "＋ Add more documents" reads new
+// files straight away and adds their rows to the ones already there;
+// "↺ Clear rows and add new documents" clears the rows (keeping the client's
+// chart, coding and settings) and reads the new files. Files dropped
+// anywhere on the page land in Step ② instead of the browser opening them
+// (which would leave the page and lose the rows).
+let addMoreClearFirst = false;
+function updateAddMoreButtons() {
+  const has = rows.length > 0 || salesInvoices.length > 0;
+  ['addMoreBtn', 'clearAddBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = has ? '' : 'none'; });
+}
+
+function addMoreDocuments(clearFirst) {
+  const box = document.getElementById('addMoreBox');
+  box.innerHTML = '';
+  const pick = () => { addMoreClearFirst = clearFirst; document.getElementById('addMoreInput').click(); };
+  if (!clearFirst) { pick(); return; }
+  // An inline confirmation (a browser confirm() box can be blocked).
+  const n = rows.length;
+  const wrap = document.createElement('div');
+  wrap.className = 'alert alert-warn show';
+  wrap.innerHTML = `<div style="margin-bottom:10px;">Clear the ${n} row${n !== 1 ? 's' : ''} below${salesInvoices.length ? ` and ${salesInvoices.length} sales invoice${salesInvoices.length !== 1 ? 's' : ''}` : ''}, then choose the new documents? ${esc(currentClientKey || 'The client')}'s chart of accounts, coding and settings are kept.</div>`;
+  const yes = document.createElement('button');
+  yes.className = 'btn btn-primary'; yes.style.marginRight = '8px'; yes.type = 'button';
+  yes.textContent = 'Yes — clear the rows and choose documents';
+  yes.onclick = () => { box.innerHTML = ''; pick(); };
+  const no = document.createElement('button');
+  no.className = 'btn'; no.type = 'button'; no.textContent = 'Cancel';
+  no.onclick = () => { box.innerHTML = ''; };
+  wrap.appendChild(yes); wrap.appendChild(no);
+  box.appendChild(wrap);
+}
+
+// Reads the given files now and adds their rows (Step ②'s queue and
+// "Process everything", so duplicates, zips and every file type work the
+// same way).
+async function addDocumentsNow(files) {
+  if (!files.length) return;
+  if (addMoreClearFirst) { addMoreClearFirst = false; clearAll(); }
+  await addFilesToUploadQueue(files);
+  const before = rows.length;
+  setAlert(`Reading ${files.length} more document${files.length !== 1 ? 's' : ''} — their rows are added to the ones below…`, 'info');
+  await processAll();
+  const added = rows.length - before;
+  const status = document.getElementById('processAllStatus').textContent;
+  setAlert(/problem/.test(status) ? `${status} (Step ② shows each file.)` : `✓ ${added} row${added !== 1 ? 's' : ''} added from ${files.length} more document${files.length !== 1 ? 's' : ''}.${uploadQueue.some(q => q.status === 'duplicate') ? ' A file already read was held back as a possible duplicate — see Step ②.' : ''}`, /problem/.test(status) ? 'warn' : 'success');
+}
+
+document.getElementById('addMoreInput').addEventListener('change', e => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  addDocumentsNow(files);
+});
+
+document.addEventListener('dragover', e => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) e.preventDefault();
+});
+document.addEventListener('drop', e => {
+  if (e.defaultPrevented || !e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files);
+  if (rows.length || salesInvoices.length) { addMoreClearFirst = false; addDocumentsNow(files); }
+  else {
+    addFilesToUploadQueue(files);
+    setAlert(`${files.length} file${files.length !== 1 ? 's' : ''} added to Step ② — press "Process everything" when ready.`, 'info');
+  }
+});
+
+// Leaving or reloading the page loses the rows — ask first.
+window.addEventListener('beforeunload', e => {
+  if (rows.length || salesInvoices.length) { e.preventDefault(); e.returnValue = ''; }
+});
+
 function clearAll() {
   rows = []; nextId = 0;
   salesInvoices = [];
@@ -5879,6 +5963,7 @@ function clearAll() {
   importedFileHashes.clear();
   uploadQueue = [];
   renderUploadFileList();
+  updateAddMoreButtons();
   setAlert('All rows cleared. Drop a new file or add rows manually.', 'info');
   refreshExportBtn();
 }
