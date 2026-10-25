@@ -3521,7 +3521,7 @@ function buildStatement(allRows) {
   // Note" columns): join those describing columns, in sheet order.
   let descCols = [];
   if (descCol < 0) {
-    descCols = baseHeader.map((h, i) => /^(type|category|item|detail|details|note|notes|memo|comment|comments|what)$/i.test(h.trim()) || loose.test(h) ? i : -1).filter(i => i >= 0);
+    descCols = baseHeader.map((h, i) => /^(type|category|item|detail|details|note|notes|memo|comment|comments|what|invoice|invoice no\.?|invoice number|customer|client|payee|name)$/i.test(h.trim()) || loose.test(h) ? i : -1).filter(i => i >= 0);
     descCol = descCols.length ? descCols[0] : -1;
     if (descCols.length < 2) descCols = [];
   }
@@ -3549,6 +3549,8 @@ function buildStatement(allRows) {
     // A note line with neither a date nor an amount (e.g. "No expenses 1st
     // to 5th April") isn't a transaction.
     if (amountCols.length && !String(r[dateCol] || '').trim() && amountCols.every(i => isNaN(parseAmount(r[i])))) continue;
+    // The sheet's own total line (no date) isn't a transaction.
+    if (!String(r[dateCol] || '').trim() && /^(grand\s+)?(sub\s*)?totals?\b/i.test(filled[0] || '')) continue;
     records.push({ cells: r, section });
   }
   const header = anySection ? ['Section', ...baseHeader] : baseHeader;
@@ -3565,6 +3567,42 @@ function buildStatement(allRows) {
     inCol: inCol < 0 ? -1 : inCol + shift,
     outCol: outCol < 0 ? -1 : outCol + shift,
   };
+}
+
+// A list whose own heading states its period (e.g. "SALES APRIL 05 2025 -
+// APRIL 05 2026" above the columns) and whose dates agree with it: the
+// dates are kept exactly as written, even if the file name says another
+// period (e.g. a file named "Sales April 2024-April 2025"). Without such a
+// heading, a date that doesn't fit the file name's period is still offered
+// for correction (a typed year typo). Returns a note when the file name
+// disagrees, '' otherwise; sets stmt.fixedDates when the heading applies.
+function applyStatedPeriod(allRows, stmt, fileName) {
+  const rows = allRows.map(r => r.map(c => String(c ?? '').trim()));
+  const headerIdx = rows.slice(0, 15).findIndex(r => r.some(c => /\bdate\b/i.test(c) && c.length < 30));
+  if (headerIdx <= 0) return '';
+  const heading = rows.slice(0, headerIdx).map(r => r.filter(c => c && !/^\d{4}-\d{2}-\d{2}$/.test(c)).join(' ')).filter(Boolean).join(' · ');
+  const stated = (heading.match(/(?<!\d)20\d{2}(?!\d)/g) || []).map(Number);
+  if (!stated.length) return '';
+  const lo = Math.min(...stated), hi = Math.max(...stated);
+  const years = stmt.records.map(r => normaliseStatementDate(r[stmt.dateCol])).filter(d => /^\d{4}-/.test(d)).map(d => +d.slice(0, 4));
+  if (!years.length || years.some(y => y < lo || y > hi)) return '';
+  stmt.fixedDates = true;
+  if (!stmt.promptNote) stmt.promptNote = `The document's own heading gives its period ("${heading.slice(0, 120)}") and every date agrees with it — return each line's Date exactly as written.`;
+  const named = (String(fileName || '').match(/(?<!\d)20\d{2}(?!\d)/g) || []).map(Number);
+  if (named.length && named.some(y => y < lo || y > hi)) {
+    return `The file name says ${named.join('–')}, but the sheet's own heading ("${heading.slice(0, 80)}") and its dates are ${lo === hi ? lo : `${lo}–${hi}`} — dates kept as written in the sheet. Check the file name.`;
+  }
+  return '';
+}
+
+// A statement date as YYYY-MM-DD when it can be read as one (dd/mm/yyyy,
+// dd/mm/yy or already ISO); otherwise as written.
+function normaliseStatementDate(v) {
+  const t = String(v ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const m = t.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/);
+  if (m && validDayMonth(+m[1], +m[2])) return `${m[3].length === 2 ? '20' + m[3] : m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return t;
 }
 
 function parseBankStatementCsv(text) {
@@ -4996,7 +5034,7 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
       const rec = matched ? stmt.records[n - 1] : null;
       addRow(mapBankRowToInternal(t, rec ? originalBankDescription(stmt, rec) : null, rec ? statementAmount(stmt, rec) : null, rec ? statementSection(stmt, rec) : '', {
         fileBu: rec ? statementBusinessUse(stmt, rec) : null,
-        fileDate: rec ? String(rec[stmt.dateCol] || '') : '',
+        fileDate: rec ? normaliseStatementDate(rec[stmt.dateCol]) : '',
         fixedDate: !!(rec && stmt.fixedDates),
         filePayee: rec && stmt.payeeCol >= 0 ? rec[stmt.payeeCol] : undefined,
         fileRef: rec && stmt.refCol >= 0 ? rec[stmt.refCol] : '',
@@ -5021,7 +5059,13 @@ function statementFailedWarning(stmt, failed, totalBatches) {
 // come through is added twice. Throws only if nothing could be read at all
 // (with the same retry info attached).
 async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
-  const stmt = preparedStmt || parseBankStatementCsv(await readFileAsPlainText(file));
+  let periodNote = '';
+  let stmt = preparedStmt;
+  if (!stmt) {
+    const csvRows = parseCsvText(await readFileAsPlainText(file));
+    stmt = buildStatement(csvRows);
+    periodNote = applyStatedPeriod(csvRows, stmt, file.name);
+  }
   if (!stmt.records.length) throw new Error('No transactions found in the file.');
   let batches = batchStatementLines(stmt, BANK_STATEMENT_ROWS_PER_CHUNK, BANK_STATEMENT_TEXT_LIMIT);
   let capped = false;
@@ -5051,6 +5095,7 @@ async function parseBankStatementCsvFile(file, onProgress, preparedStmt) {
   if (capped) {
     other.push(`Very large statement — only the first ${MAX_BANK_STATEMENT_CHUNKS * BANK_STATEMENT_ROWS_PER_CHUNK} transactions were read. Split it and add the rest separately.`);
   }
+  if (periodNote) other.unshift(periodNote);
   if (retry) retry.otherWarning = other.join(' ');
   return { added, warning: [statementFailedWarning(stmt, failed, batches.length), ...other].filter(Boolean).join(' '), retry };
 }
@@ -5123,9 +5168,11 @@ async function processUnifiedQueue() {
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
         } else if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
-          const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, buildStatement(sheet.rows));
+          const stmt = buildStatement(sheet.rows);
+          const periodNote = applyStatedPeriod(sheet.rows, stmt, item.file.name);
+          const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, stmt);
           item.addedCount = result.added;
-          item.warning = result.warning || null;
+          item.warning = [periodNote, result.warning].filter(Boolean).join(' ') || null;
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
         } else if (looksLikeFirmTemplate(sheet.rows, sheet.sheetNames)) {
