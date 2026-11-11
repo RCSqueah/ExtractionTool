@@ -236,7 +236,29 @@
     border-radius: var(--radius-lg);
     overflow: auto;
     margin-bottom: 20px;
+    /* The table scrolls inside its own box, so the column headings stay in
+       view (they're position: sticky) however far down you go. */
+    max-height: calc(100vh - 90px);
   }
+
+  /* Tick rows, then Merge / Delete / Undo — stays at the top while scrolling. */
+  .row-actions {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 0; margin-bottom: 4px; background: var(--bg);
+  }
+  .row-actions .ra-label { font-size: 13px; color: var(--text-muted); margin-right: 2px; }
+  .row-actions .ra-count { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-faint); margin-left: 4px; }
+  .row-actions .ra-info {
+    display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border: 1.5px solid var(--text-faint); border-radius: 50%; color: var(--text-muted);
+    font: italic 600 12px/1 Georgia, serif; cursor: help;
+  }
+  .btn-danger { color: var(--red); border-color: var(--red); }
+  .btn-danger:hover { background: var(--red-bg); border-color: var(--red); }
+  .btn-danger:disabled, .row-actions .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-danger:disabled:hover { background: var(--surface); }
+  thead th input[type=checkbox] { accent-color: #fff; cursor: pointer; }
 
   table {
     width: 100%;
@@ -931,6 +953,15 @@
   </div>
   <div id="addMoreBox"></div>
 
+  <div class="row-actions" id="rowActions" style="display:none">
+    <span class="ra-label">Tick rows, then:</span>
+    <button class="btn" type="button" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge</button>
+    <button class="btn btn-danger" type="button" id="deleteRowsBtn" onclick="deleteSelectedRows()" disabled>Delete</button>
+    <button class="btn" type="button" id="undoRowsBtn" onclick="undoLastRowAction()" disabled>↶ Undo</button>
+    <span class="ra-info" tabindex="0" role="img" aria-label="Help" title="Tick the box on each row (or the box in the heading for all rows), then Merge them into one row or Delete them. Undo reverses the last merge, delete or instruction — press it again to go further back. Instructions for these rows (below the table) also work on the ticked rows.">i</span>
+    <span class="ra-count" id="rowActionsCount"></span>
+  </div>
+
   <div class="table-wrap" id="tableWrap">
     <div class="empty-state" id="emptyState">
       <div style="font-size:28px">📋</div>
@@ -939,7 +970,7 @@
     <table id="expTable" style="display:none">
       <thead>
         <tr>
-          <th style="width:56px" data-col="merge">Merge</th>
+          <th style="width:40px;text-align:center" data-col="select"><input type="checkbox" id="selectAllRows" onchange="selectAllRows(this.checked)" title="Tick or untick every row" aria-label="Tick every row"></th>
           <th style="min-width:170px" onclick="sortBy('acc')" class="sortable" data-col="acc">Account <span class="sort-ind" id="si-acc"></span></th>
           <th style="min-width:150px" onclick="sortBy('vat')" class="sortable" data-col="vat">VAT Rate <span class="sort-ind" id="si-vat"></span></th>
           <th style="min-width:70px" onclick="sortBy('ref')" class="sortable" data-col="ref">Ref <span class="sort-ind" id="si-ref"></span></th>
@@ -951,7 +982,6 @@
           <th style="width:100px">% BU</th>
           <th style="width:60px">Home</th>
           <th style="width:100px" onclick="sortBy('net')" class="sortable text-right" data-col="net">BU Amt £ <span class="sort-ind" id="si-net"></span></th>
-          <th style="width:32px"></th>
         </tr>
       </thead>
       <tbody id="expBody"></tbody>
@@ -959,7 +989,6 @@
   </div>
 
   <div class="table-footer-actions">
-    <button class="btn" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge selected rows</button>
     <button class="btn btn-add" onclick="addBlankRow()">+ Add row</button>
   </div>
 
@@ -967,7 +996,6 @@
   <div class="row-instructions" id="rowInstructionBox" style="display:none">
     <div class="cq-head">
       <h3>INSTRUCTIONS FOR THESE ROWS</h3>
-      <button class="btn" type="button" id="rowInstructionUndoBtn" onclick="undoRowInstruction()" style="display:none" title="Put the rows the last instruction changed back as they were">↶ Undo last instruction</button>
     </div>
     <p class="cq-hint">Tell Claude what to change in plain English, e.g. <em>"For the Wandsworth council tax lines use the full bill (e.g. £54.60), not the client's 30%"</em> or <em>"Code all TfL and Oyster lines to travel"</em>. You'll see each change before anything is applied. <span id="rowInstructionScope"></span></p>
     <div class="ri-input">
@@ -4224,8 +4252,8 @@ function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
     notes.push(`${outside.length} line${outside.length !== 1 ? 's' : ''} dated outside ${yearLabel} left out (${span}: ${fmtMoney(sum('in'))} income, ${fmtMoney(sum('out'))} costs).`);
   }
   if (breakdownSkipped) notes.push('The "Breakdown" summary columns were not read — they repeat the daily costs.');
-  if (checks.length) notes.push(`Check: ${checks.join('; ')}.`);
-  return { stmt, note: notes.join(' ') };
+  const check = checks.length ? `Check: ${checks.join('; ')}.` : '';
+  return { stmt, note: notes.join(' '), check };
 }
 
 // A workbook with one sheet per year (e.g. "2024-2025", "2025-2026"):
@@ -5514,7 +5542,8 @@ async function processUnifiedQueue() {
           const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, mr.stmt);
           item.addedCount = result.added;
           if (result.added) addFileClientQueries(item.file.name, mr.stmt.fileQueries);
-          item.warning = [mr.note, result.warning].filter(Boolean).join(' ') || null;
+          item.info = mr.note || null;
+          item.warning = [mr.check, result.warning].filter(Boolean).join(' ') || null;
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
         } else if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
@@ -5831,19 +5860,95 @@ function toggleRowSelect(id, checked) {
   updateRowInstructionBox();
 }
 
+// The bar above the table: Merge (2+ ticked), Delete (1+ ticked), Undo,
+// and the heading's tick box (all / some / none ticked).
 function updateMergeButton() {
-  const btn = document.getElementById('mergeRowsBtn');
-  if (!btn) return;
-  const n = rows.filter(r => r._selected).length;
-  btn.disabled = n < 2;
-  btn.textContent = n >= 2 ? `Merge selected rows (${n})` : 'Merge selected rows';
+  const bar = document.getElementById('rowActions');
+  if (!bar) return;
+  const tickable = rows.filter(r => r.kind !== 'sale');
+  const n = tickable.filter(r => r._selected).length;
+  bar.style.display = rows.length || rowUndoStack.length ? 'flex' : 'none';
+  const merge = document.getElementById('mergeRowsBtn');
+  merge.disabled = n < 2;
+  merge.textContent = n >= 2 ? `Merge (${n})` : 'Merge';
+  const del = document.getElementById('deleteRowsBtn');
+  del.disabled = !n;
+  del.textContent = n ? `Delete (${n})` : 'Delete';
+  const undo = document.getElementById('undoRowsBtn');
+  const last = rowUndoStack[rowUndoStack.length - 1];
+  undo.disabled = !last;
+  undo.title = last ? `Undo: ${last.label}` : 'Nothing to undo';
+  document.getElementById('rowActionsCount').textContent = n ? `${n} ticked` : '';
+  const all = document.getElementById('selectAllRows');
+  if (all) { all.checked = !!tickable.length && n === tickable.length; all.indeterminate = n > 0 && n < tickable.length; }
+}
+
+function selectAllRows(on) {
+  rows.forEach(r => {
+    if (r.kind === 'sale') return;
+    r._selected = on;
+    const cb = document.querySelector(`#tr_${r.id} input.row-select`);
+    if (cb) cb.checked = on;
+  });
+  updateMergeButton();
+  updateRowInstructionBox();
+}
+
+// ── UNDO (merge, delete, instructions) ──────────────────────────────────────
+// Before each change, a copy of every row (and the sales invoices, which
+// deleting a sale line can drop) is kept; Undo puts the last one back.
+const ROW_UNDO_LIMIT = 20;
+let rowUndoStack = [];
+
+function pushRowUndo(label) {
+  rowUndoStack.push({
+    label,
+    rows: rows.map(r => ({ ...r, clientQuery: [...(r.clientQuery || [])], _selected: false })),
+    salesInvoices: salesInvoices.slice(),
+  });
+  if (rowUndoStack.length > ROW_UNDO_LIMIT) rowUndoStack.shift();
+}
+
+function rebuildRowTable() {
+  const tbody = document.getElementById('expBody');
+  tbody.innerHTML = '';
+  rows.forEach(r => renderRow(r));
+  if (rows.length) showTable();
+  else {
+    document.getElementById('expTable').style.display = 'none';
+    document.getElementById('emptyState').style.display = 'block';
+    updateUI();
+  }
+}
+
+function undoLastRowAction() {
+  const snap = rowUndoStack.pop();
+  if (!snap) return;
+  rows = snap.rows;
+  salesInvoices = snap.salesInvoices;
+  renderSalesTable();
+  rebuildRowTable();
+  checkHomeRows();
+  updateUI();
+  setAlert(`Undone: ${snap.label}.`, 'info');
+}
+
+function deleteSelectedRows() {
+  const picked = rows.filter(r => r._selected && r.kind !== 'sale');
+  if (!picked.length) return;
+  pushRowUndo(`delete ${picked.length} row${picked.length !== 1 ? 's' : ''}`);
+  picked.forEach(r => removeRow(r.id));
+  checkHomeRows();
+  updateUI();
+  setAlert(`${picked.length} row${picked.length !== 1 ? 's' : ''} deleted — ↶ Undo puts ${picked.length !== 1 ? 'them' : 'it'} back.`, 'info');
 }
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
 function mergeSelectedRows() {
-  const selected = rows.filter(r => r._selected);
+  const selected = rows.filter(r => r._selected && r.kind !== 'sale');
   if (selected.length < 2) return;
+  pushRowUndo(`merge ${selected.length} rows`);
 
   // Read live DOM values rather than the `rows` array directly — an edit
   // that hasn't lost focus yet (no blur/change fired) wouldn't otherwise be
@@ -5951,7 +6056,7 @@ function buildRowHTML(row) {
     <td class="no-strike" style="text-align:center;">
       ${row.kind === 'sale'
         ? `<input type="checkbox" ${row.post === 'YES' ? 'checked' : ''} onchange="toggleSaleInclude('${esc(row.invoiceKey)}',this.checked)" title="Include sales invoice ${esc(row.ref)} in the Sales Invoices CSV"><div style="font-size:9px;color:var(--blue);letter-spacing:0.04em;">SALE</div>`
-        : `<input type="checkbox" class="row-select" onchange="toggleRowSelect(${id},this.checked)" ${row._selected ? 'checked' : ''} title="Select rows to merge into one">`}
+        : `<input type="checkbox" class="row-select" onchange="toggleRowSelect(${id},this.checked)" ${row._selected ? 'checked' : ''} title="Tick to merge, delete or give an instruction for this row" aria-label="Tick this row">`}
     </td>
     <td><select onchange="onAccChange(${id},this.value)">${accOptions(row.acc)}</select></td>
     <td><select onchange="onVatChange(${id},this.value)">${vatOptions(row.vat)}</select></td>
@@ -5981,9 +6086,6 @@ function buildRowHTML(row) {
     <td class="no-strike">
       <div class="net-amt${netAdj?' adjusted':''}${inRow?' money-in':''}\" id="net_${id}">${netStr}</div>
       <div class="personal-split" id="split_${id}">${personalCaption(row)}</div>
-    </td>
-    <td class="no-strike">
-      <button class="del-row" onclick="removeRow(${id})">×</button>
     </td>
   `;
 }
@@ -6430,6 +6532,7 @@ function updateUI() {
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
   updateAddMoreButtons();
+  updateMergeButton();
   updateRowInstructionBox();
   renderClientQueries();
 }
@@ -6621,7 +6724,6 @@ window.addEventListener('beforeunload', e => {
 
 const ROW_INSTRUCTION_BATCH = 300;   // rows per request
 let rowInstructionPending = null;    // { instruction, proposals: [{ id, set, del, reason, diffs }] }
-let rowInstructionUndo = null;       // { snapshots: [{ row, index }], count }
 
 const ROW_CHANGE_SCHEMA = {
   type: 'object',
@@ -6816,57 +6918,29 @@ function applyRowInstruction() {
   const p = rowInstructionPending;
   if (!p) return;
   const chosen = p.proposals.filter(c => c.on);
-  const snapshots = [];
+  if (!chosen.length) return;
+  pushRowUndo(`instruction "${p.instruction.length > 40 ? p.instruction.slice(0, 37) + '…' : p.instruction}"`);
+  let changed = 0;
   const short = p.instruction.length > 60 ? p.instruction.slice(0, 57) + '…' : p.instruction;
   chosen.forEach(c => {
     const index = rows.findIndex(r => r.id === c.id);
     if (index < 0) return;
     const row = rows[index];
-    snapshots.push({ row: { ...row, clientQuery: [...(row.clientQuery || [])] }, index });
-    if (c.del) { removeRow(row.id); return; }
+    if (c.del) { removeRow(row.id); changed++; return; }
     const before = { acc: row.acc, vat: row.vat };
     const diffs = applyRowChange(row, c.set);
     if (!diffs.length) return;
+    changed++;
     row.notes = joinNotes([row.notes, `Changed by your instruction "${short}": ${diffs.map(d => `${d.label} ${d.from} → ${d.to}`).join(', ')}`]);
     rerenderRow(row);
     if (row.acc !== before.acc || row.vat !== before.vat) recordUserCorrection(row);
   });
-  rowInstructionUndo = snapshots.length ? { snapshots, count: snapshots.length } : null;
   rowInstructionPending = null;
   renderRowInstructionPreview();
   checkHomeRows();
   updateUI();
   const status = document.getElementById('rowInstructionStatus');
-  status.textContent = `${snapshots.length} row${snapshots.length !== 1 ? 's' : ''} changed. Each change is written in the row's Notes.`;
-  document.getElementById('rowInstructionUndoBtn').style.display = rowInstructionUndo ? '' : 'none';
-}
-
-// Puts the rows the last instruction changed (or deleted) back as they were.
-function undoRowInstruction() {
-  const u = rowInstructionUndo;
-  if (!u) return;
-  const tbody = document.getElementById('expBody');
-  u.snapshots.slice().sort((a, b) => a.index - b.index).forEach(({ row, index }) => {
-    const at = rows.findIndex(r => r.id === row.id);
-    if (at >= 0) {
-      rows[at] = row;
-      rerenderRow(row);
-    } else {
-      // A deleted row goes back where it was.
-      const pos = Math.min(index, rows.length);
-      rows.splice(pos, 0, row);
-      const tr = document.createElement('tr');
-      tr.id = 'tr_' + row.id;
-      tbody.insertBefore(tr, rows[pos + 1] ? document.getElementById('tr_' + rows[pos + 1].id) : null);
-      rerenderRow(row);
-      showTable();
-    }
-  });
-  rowInstructionUndo = null;
-  document.getElementById('rowInstructionUndoBtn').style.display = 'none';
-  document.getElementById('rowInstructionStatus').textContent = `Undone — ${u.count} row${u.count !== 1 ? 's' : ''} put back as they were.`;
-  checkHomeRows();
-  updateUI();
+  status.textContent = `${changed} row${changed !== 1 ? 's' : ''} changed. Each change is written in the row's Notes; ↶ Undo above the table reverses it.`;
 }
 
 // Shown once there are rows; the hint says whether ticked rows or all rows
@@ -6875,9 +6949,9 @@ function updateRowInstructionBox() {
   const box = document.getElementById('rowInstructionBox');
   if (!box) return;
   const { list, selectedOnly } = rowsForInstruction();
-  box.style.display = list.length || rowInstructionPending || rowInstructionUndo ? 'block' : 'none';
+  box.style.display = list.length || rowInstructionPending ? 'block' : 'none';
   const scope = document.getElementById('rowInstructionScope');
-  if (scope) scope.textContent = selectedOnly ? `Applies to the ${list.length} ticked row${list.length !== 1 ? 's' : ''}.` : `Applies to all ${list.length} rows. Tick rows in the Merge column to limit it to those.`;
+  if (scope) scope.textContent = selectedOnly ? `Applies to the ${list.length} ticked row${list.length !== 1 ? 's' : ''}.` : `Applies to all ${list.length} rows. Tick rows to limit it to those.`;
 }
 
 
@@ -6945,9 +7019,8 @@ async function copyClientQueries() {
 function clearAll() {
   rows = []; nextId = 0;
   fileClientQueries = []; clientQueriesEdited = false;
-  rowInstructionPending = null; rowInstructionUndo = null;
+  rowInstructionPending = null; rowUndoStack = [];
   renderRowInstructionPreview();
-  const riUndo = document.getElementById('rowInstructionUndoBtn'); if (riUndo) riUndo.style.display = 'none';
   const riStatus = document.getElementById('rowInstructionStatus'); if (riStatus) riStatus.textContent = '';
   salesInvoices = [];
   renderSalesTable();
