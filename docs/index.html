@@ -553,6 +553,23 @@
     background: #fff;
   }
 
+  /* ── QUESTIONS FOR THE CLIENT ── */
+  .client-queries {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--amber);
+    border-radius: var(--radius-lg); padding: 14px 16px; margin: 0 0 20px;
+  }
+  .client-queries .cq-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .client-queries h3 { margin: 0; font-size: 13px; letter-spacing: 0.04em; }
+  .client-queries .cq-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .client-queries .cq-edited { font-size: 11px; color: var(--amber); }
+  .client-queries .cq-hint { margin: 6px 0 10px; font-size: 12px; color: var(--text-muted); }
+  .client-queries textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+    font: 13px/1.5 inherit; font-family: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
+  }
+  .client-queries textarea:focus { outline: none; border-color: var(--text); background: #fff; }
+
   /* ── UNIFIED UPLOAD ── */
   .table-footer-actions {
     display: flex;
@@ -917,6 +934,20 @@
   <div class="table-footer-actions">
     <button class="btn" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge selected rows</button>
     <button class="btn btn-add" onclick="addBlankRow()">+ Add row</button>
+  </div>
+
+  <!-- QUESTIONS FOR THE CLIENT -->
+  <div class="client-queries" id="clientQueriesBox" style="display:none">
+    <div class="cq-head">
+      <h3>THINGS IN THE CLIENT'S SHEET TO CHECK</h3>
+      <div class="cq-actions">
+        <span id="cqEdited" class="cq-edited" style="display:none">Edited by you · rows have changed since</span>
+        <button class="btn" type="button" id="cqRebuildBtn" onclick="renderClientQueries(true)" style="display:none" title="Replace the text below with the questions for the rows as they are now — your edits are lost">↻ Rebuild from rows</button>
+        <button class="btn" type="button" id="cqCopyBtn" onclick="copyClientQueries()">⧉ Copy for email</button>
+      </div>
+    </div>
+    <p class="cq-hint">Questions about the client's own records, worded to paste into an email. Edit freely. Deleting a row drops its question.</p>
+    <textarea id="clientQueriesText" rows="10" spellcheck="true" aria-label="Things in the client's sheet to check" oninput="clientQueriesEdited = true"></textarea>
   </div>
 
   <!-- SUMMARY -->
@@ -3980,6 +4011,8 @@ function reportWordingAmount(text) {
 const isoOf = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 const taxYearOf = iso => { const y = +iso.slice(0, 4), md = iso.slice(5); return md >= '04-06' ? y : y - 1; };
 const fmtMoney = n => `£${(Math.round(n * 100) / 100).toFixed(2)}`;
+// Money as the client would write it: £2,923.32.
+const clientMoney = n => `£${(Math.round(n * 100) / 100).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // Builds the statement for a monthly-report workbook: every income and cost
 // line of the chosen tax year, dated, with anything the accountant should
@@ -3989,18 +4022,33 @@ function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
   const C = { period: 1, day: 2, date: 3, desc: 4, amount: 5, money: 6 };
   const lines = [];       // every line read, before the tax year is chosen
   const checks = [];      // block totals that don't match their lines
+  const fileQueries = []; // the same, worded for the client
   let breakdownSkipped = false;
 
   for (const sh of sheets) {
     let block = null;
     const closeBlock = () => {
-      if (!block || !block.total) return;
+      if (!block) return;
+      // An amount only in the wording: does the period's own total include it?
+      const totalMatches = side => {
+        const own = block.total && block.total[side];
+        if (own === undefined || own === null) return null;
+        const read = block.lines.filter(l => l.money === side && typeof l.amount === 'number').reduce((s, l) => s + l.amount, 0);
+        return Math.abs(read - own) <= 0.005;
+      };
+      block.fromWording.forEach(w => {
+        w.ask[w.i] = totalMatches(w.money)
+          ? `the amount is only in the description, not the TOTAL column — please confirm it was ${clientMoney(w.amount)}`
+          : `there's no figure in the TOTAL column, so it isn't in that period's total — should ${clientMoney(w.amount)} be included?`;
+      });
+      if (!block.total) return;
       for (const side of ['in', 'out']) {
         const own = block.total[side];
         if (own === undefined) continue;
         const read = block.lines.filter(l => l.money === side && typeof l.amount === 'number').reduce((s, l) => s + l.amount, 0);
         if (Math.abs(read - own) > 0.005) {
           checks.push(`${block.label}: ${side === 'in' ? 'income' : 'expense'} lines add up to ${fmtMoney(read)} but the sheet's total says ${fmtMoney(own)}`);
+          fileQueries.push(`For ${block.label}, your ${side === 'in' ? 'income' : 'expense'} lines add up to ${clientMoney(read)}, but the total for that period says ${clientMoney(own)} — is anything missing or entered twice?`);
         }
       }
     };
@@ -4015,7 +4063,7 @@ function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
         if (row.slice(cols.expAmt + 1).some(Boolean)) breakdownSkipped = true;
         const s = pendingPeriod.start;
         const label = `${pendingPeriod.start.split('-').reverse().join('/')}–${pendingPeriod.end.split('-').reverse().join('/')}`;
-        block = { cols, period: pendingPeriod, label, lines: [], total: null, y: +s.slice(0, 4), m: +s.slice(5, 7), d: +s.slice(8) - 1, dayRaw: '' };
+        block = { cols, period: pendingPeriod, label, lines: [], fromWording: [], total: null, y: +s.slice(0, 4), m: +s.slice(5, 7), d: +s.slice(8) - 1, dayRaw: '' };
         pendingPeriod = null;
         continue;
       }
@@ -4051,39 +4099,48 @@ function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
       }
       for (const [text, amtRaw, money] of [[earnText, earnAmt, 'in'], [expText, expAmt, 'out']]) {
         if (!text && !amtRaw) continue;
-        const notes = [];
+        const notes = [], ask = [];
         let date = '';
-        if (!block.dayRaw) notes.push("No day on the sheet — the block's first day used, check");
+        if (!block.dayRaw) { notes.push("No day on the sheet — the block's first day used, check"); ask.push('no day is given — what date should it be?'); }
         if (block.d >= 1 && validDayMonth(block.d, block.m)) date = isoOf(block.y, block.m, block.d);
         else if (block.d >= 29 && block.d <= 31 && block.m >= 1 && block.m <= 12) {
           // The sheet lists 29–31 under every month; a day the month doesn't
           // have goes on its last day.
           const last = new Date(block.y, block.m, 0).getDate();
           date = isoOf(block.y, block.m, last);
-          notes.push(`Day ${block.d} isn't in ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][block.m - 1]} — dated the ${last}th, check`);
+          const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][block.m - 1];
+          notes.push(`Day ${block.d} isn't in ${mon} — dated the ${last}th, check`);
+          ask.push(`it's on ${block.d} ${mon}, which doesn't exist — which date should it be?`);
         }
-        if (!date) { date = block.period.start; notes.push(`Day "${block.dayRaw}" not understood — the block's first day used, check`); }
+        if (!date) { date = block.period.start; notes.push(`Day "${block.dayRaw}" not understood — the block's first day used, check`); ask.push(`we couldn't tell which day this was ("${block.dayRaw}") — what date should it be?`); }
         else if (date < block.period.start || date > block.period.end) notes.push(`Date worked out as ${date.split('-').reverse().join('/')}, outside the block's period ${block.label} — check`);
         const cell = parseAmount(amtRaw);
         const worded = reportWordingAmount(text);
         let amount = isNaN(cell) ? null : cell;
-        if (amount === null && amtRaw) notes.push(`Amount "${amtRaw}" not understood — enter it`);
+        if (amount === null && amtRaw) { notes.push(`Amount "${amtRaw}" not understood — enter it`); ask.push(`the amount "${amtRaw}" isn't clear — how much was it?`); }
         if (amount === null && !amtRaw && worded) {
           amount = worded.amount;
           notes.push(`Amount ${fmtMoney(amount)} taken from the wording — the sheet's amount column is blank, check`);
+          // Worded once the block's total is known (see closeBlock).
+          block.fromWording.push({ ask, i: ask.length, money, amount });
+          ask.push('');
         }
         if (amount !== null && worded && worded.stated && worded.pct == null && Math.abs(worded.amount - amount) > 0.005) {
           notes.push(`The wording says ${fmtMoney(worded.amount)} but the amount column has ${fmtMoney(amount)} — the amount column is used, check`);
+          ask.push(`the description says ${clientMoney(worded.amount)} but the TOTAL column has ${clientMoney(amount)} — which is right?`);
         }
         if (worded && worded.pct !== null && worded.pct !== undefined) {
           notes.push(`Client's ${worded.pct}% share of ${fmtMoney(worded.of)} — already the business share`);
           // The client's own sum, checked: "£50 x 30% = £20" is really £15.
           const right = worded.of * worded.pct / 100;
-          if (amount !== null && Math.abs(right - amount) > 0.02) notes.push(`${fmtMoney(worded.of)} × ${worded.pct}% is ${fmtMoney(right)}, not ${fmtMoney(amount)} — check`);
+          if (amount !== null && Math.abs(right - amount) > 0.02) {
+            notes.push(`${fmtMoney(worded.of)} × ${worded.pct}% is ${fmtMoney(right)}, not ${fmtMoney(amount)} — check`);
+            ask.push(`${worded.pct}% of ${clientMoney(worded.of)} is ${clientMoney(right)}, but ${clientMoney(amount)} is entered — which is right?`);
+          }
         }
         if (amount === 0) continue;
         block.lines.push({ money, amount });
-        lines.push({ notes, label: block.label, dayRaw: block.dayRaw, date, text: text || (money === 'in' ? 'Income' : 'Expense'), amount, money });
+        lines.push({ notes, ask, label: block.label, dayRaw: block.dayRaw, date, text: text || (money === 'in' ? 'Income' : 'Expense'), amount, money });
       }
     }
     closeBlock();
@@ -4115,6 +4172,7 @@ function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
     descCol: C.desc, descCols: [], dateCol: C.date, amountCol: C.amount, amountIsCost: false,
     buCols: [], inCol: -1, outCol: -1,
     moneyCol: C.money, payeeCol: -1, refCol: -1, fixedDates: true,
+    clientQueries: inYear.map(l => l.ask), fileQueries,
     promptNote: `This is the client's own income-and-expenses book for tax year ${yearLabel}, kept as a report per month: each line is one day's job (money in — the customer or area cleaned) or one cost (money out), exactly as the client typed it. Money in/out is in the "Money" column. Each line's Date has already been worked out — return it unchanged. Where the client's wording works out a share (e.g. "Thames Water £25 x 50% = £12.50", "Council Tax £80 x 30%"), the Amount is ALREADY the business share: never set a business-use % for it. Household bills claimed at a share like that (water, gas/electricity, council tax, and broadband/landline if that's this client's usual coding) are Use of Home costs; a mobile phone bill at a share is telephone. A person's first name alone, or with "£120"-type figures, is usually someone paid to help on the day's work (direct costs / subcontractor, per this client's usual coding). Code each line to this client's own chart of accounts and usual coding above.`,
   };
   const notes = [`Read as a monthly report: tax year ${yearLabel} (from ${how}).`];
@@ -4331,7 +4389,9 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const desc = original || t.description || '';
   const notes = [];
   if (section) notes.push(section);
-  if (fromFile && fromFile.missing) notes.push("No amount on the client's sheet — enter it");
+  // Questions for the client (see "Things in the client's sheet to check").
+  const ask = [...(opts.clientQuery || [])];
+  if (fromFile && fromFile.missing) { notes.push("No amount on the client's sheet — enter it"); if (original) ask.push('no amount is given — how much was it?'); }
   if (!original) notes.push(opts.unmatchedNote || "Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
@@ -4346,6 +4406,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const fileBu = opts.fileBu;
   if (fileBu && fileBu.tbc) {
     notes.push(`Business use is "${fileBu.raw}" on the client's sheet — decide the % before exporting`);
+    ask.push(`the business-use share is "${fileBu.raw}" — what percentage is for the business?`);
   } else if (fileBu && fileBu.pct !== undefined) {
     // The client's own % from the file; 100% needs no adjustment.
     if (fileBu.pct > 0 && fileBu.pct < 100 && !isHome213(accFull)) bu = fileBu.pct;
@@ -4387,6 +4448,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
     home: false,
     direction: direction,
     fromBank: true,
+    clientQuery: ask,
   };
 }
 
@@ -5274,6 +5336,7 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
         fixedDate: !!(rec && stmt.fixedDates),
         filePayee: rec && stmt.payeeCol >= 0 ? rec[stmt.payeeCol] : undefined,
         fileRef: rec && stmt.refCol >= 0 ? rec[stmt.refCol] : '',
+        clientQuery: rec && stmt.clientQueries ? stmt.clientQueries[n - 1] : null,
       }));
       added++;
     });
@@ -5408,6 +5471,7 @@ async function processUnifiedQueue() {
           const mr = buildMonthlyReportStatement(sheet.sheets, document.getElementById('customQuarterDate')?.value || '', item.file.name);
           const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, mr.stmt);
           item.addedCount = result.added;
+          if (result.added) addFileClientQueries(item.file.name, mr.stmt.fileQueries);
           item.warning = [mr.note, result.warning].filter(Boolean).join(' ') || null;
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
@@ -5648,6 +5712,8 @@ function addRow(data) {
     // parseSalesInvoicesText): exported only in the Sales Invoices CSV.
     kind: d.kind || '',
     invoiceKey: d.invoiceKey || '',
+    // Questions for the client about this line, worded for an email.
+    clientQuery: Array.isArray(d.clientQuery) ? d.clientQuery.filter(Boolean) : [],
     saleNet: d.saleNet, saleTax: d.saleTax, saleRate: d.saleRate, saleGross: d.gross,
     _selected: false,
   });
@@ -5801,6 +5867,7 @@ function mergeSelectedRows() {
     home: false,
     direction: anyBank && signedTotal > 0 ? 'in' : 'out',
     fromBank: anyBank,
+    clientQuery: [...new Set(selected.flatMap(r => r.clientQuery || []))],
   };
 
   // Remove the originals first so the merged row lands cleanly at the end
@@ -6320,6 +6387,7 @@ function updateUI() {
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
   updateAddMoreButtons();
+  renderClientQueries();
 }
 
 function updateSummary() {
@@ -6496,8 +6564,71 @@ window.addEventListener('beforeunload', e => {
   if (rows.length || salesInvoices.length) { e.preventDefault(); e.returnValue = ''; }
 });
 
+
+// ── THINGS IN THE CLIENT'S SHEET TO CHECK ───────────────────────────────────
+// Questions about the client's own records (a sum that doesn't add up, a
+// cost with no amount, a month whose total doesn't match its lines), worded
+// so they can be pasted straight into an email to the client. Each row
+// carries its own questions (row.clientQuery), so deleting or merging rows
+// keeps the list in step; questions about a whole file (e.g. a month's
+// total) are kept here until the rows are cleared.
+let fileClientQueries = [];   // [{ file, text }]
+let clientQueriesEdited = false;
+
+function addFileClientQueries(fileName, list) {
+  (list || []).forEach(text => {
+    if (!fileClientQueries.some(q => q.file === fileName && q.text === text)) fileClientQueries.push({ file: fileName, text });
+  });
+  renderClientQueries();
+}
+
+function clientQueryDate(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${+m[3]} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m[2] - 1]} ${m[1]}` : '';
+}
+
+function buildClientQueriesText() {
+  const asked = rows.filter(r => r.clientQuery && r.clientQuery.length);
+  if (!asked.length && !fileClientQueries.length) return '';
+  const files = new Set(fileClientQueries.map(q => q.file));
+  const lines = fileClientQueries.map(q => `• ${q.text}${files.size > 1 ? ` (${q.file})` : ''}`);
+  asked.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(r => {
+    const what = String(r.desc || r.supplier || 'This item').replace(/\s+/g, ' ').trim();
+    // A question about the date itself names the date the client typed.
+    const when = r.clientQuery.some(q => /which date/.test(q)) ? '' : clientQueryDate(r.date);
+    const money = r.gross !== '' && !isNaN(Number(r.gross)) ? ` (${clientMoney(Number(r.gross))})` : '';
+    lines.push(`• ${when ? when + ' — ' : ''}"${what}"${r.clientQuery.length > 1 || !/£/.test(r.clientQuery[0]) ? money : ''}: ${r.clientQuery.join('; ')}`);
+  });
+  return `While preparing your accounts we noticed a few things in your records that we'd like you to check:\n\n${lines.join('\n')}\n\nCould you let us know the correct figures? Thank you.`;
+}
+
+// Shows the box when there's anything to ask. Text you've edited is kept
+// (with a "Rebuild from rows" button) unless `force` is set.
+function renderClientQueries(force) {
+  const box = document.getElementById('clientQueriesBox');
+  const ta = document.getElementById('clientQueriesText');
+  if (!box || !ta) return;
+  const text = buildClientQueriesText();
+  if (force === true) clientQueriesEdited = false;
+  if (!clientQueriesEdited) ta.value = text;
+  const stale = clientQueriesEdited && ta.value !== text;
+  document.getElementById('cqEdited').style.display = stale ? '' : 'none';
+  document.getElementById('cqRebuildBtn').style.display = stale ? '' : 'none';
+  box.style.display = (text || (clientQueriesEdited && ta.value.trim())) ? 'block' : 'none';
+}
+
+async function copyClientQueries() {
+  const ta = document.getElementById('clientQueriesText');
+  const btn = document.getElementById('cqCopyBtn');
+  try { await navigator.clipboard.writeText(ta.value); }
+  catch { ta.select(); document.execCommand('copy'); }
+  btn.textContent = '✓ Copied';
+  setTimeout(() => { btn.textContent = '⧉ Copy for email'; }, 1500);
+}
+
 function clearAll() {
   rows = []; nextId = 0;
+  fileClientQueries = []; clientQueriesEdited = false;
   salesInvoices = [];
   renderSalesTable();
   document.getElementById('expBody').innerHTML = '';

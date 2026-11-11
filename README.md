@@ -2,6 +2,8 @@
 
 A browser tool that turns a client's documents (expense templates and lists, bank statements as CSV or PDF, bills and receipts, emails, their own notes, and their sales invoices) into Xero-ready CSVs: Bills, Bank Statement or Sales Invoices.
 
+Under the Extracted Rows, a **Things in the client's sheet to check** box lists questions about the client's own records (sums that don't add up, costs with no amount, a month whose lines don't match its total, an unclear business-use %), worded so you can copy them straight into an email to the client. You can edit the text, and deleting a row drops its question.
+
 Features include a per-client chart of accounts learned from a Xero export, remembered coding history, a use-of-home calculator, business-use % adjustments, row merging, and supplier VAT overrides.
 
 ## How it works
