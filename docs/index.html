@@ -6189,10 +6189,20 @@ function undoPropagateBU(id, prevBu) {
   updateNet(id);
 }
 
+// The ⌂ ON toggle (apply the Use of Home % to an ordinary row) belongs to
+// the account it was set on. A Use of Home account applies the % itself and
+// shows ⌂ AUTO, so moving a row onto it or off it switches ⌂ ON off — it
+// would otherwise stay on, hidden, and reappear on the new account.
+function resetHomeOnAccountChange(row, oldAcc) {
+  if (row.home && oldAcc !== row.acc && (isHome213(oldAcc) || isHome213(row.acc))) row.home = false;
+}
+
 function onAccChange(id, val) {
   const row = rows.find(r => r.id === id);
   if (!row) return;
+  const oldAcc = row.acc;
   row.acc = val;
+  resetHomeOnAccountChange(row, oldAcc);
   const dv = defaultVat(val);
   if (dv) {
     row.vat = flatRateVat(row.direction, dv);
@@ -6246,8 +6256,10 @@ function propagateDescMatch(sourceId, changedField) {
     if (rDesc !== desc) return;
 
     // Apply the change
+    const oldAcc = r.acc;
     r.acc = source.acc;
     r.vat = source.vat;
+    resetHomeOnAccountChange(r, oldAcc);
     propagatedRows.add(`propagated_${r.id}`);
     const tr = document.getElementById('tr_'+r.id);
     if (tr) {
@@ -6816,7 +6828,9 @@ function applyRowChange(row, c) {
   if (c.accountCode) {
     const a = ACCOUNTS.find(x => x.code === String(c.accountCode).trim());
     if (a) {
+      const oldAcc = row.acc;
       put('acc', 'Account', `${a.code} - ${a.name}`);
+      if (row.home && (isHome213(oldAcc) || isHome213(row.acc))) put('home', 'Use of Home', false);
       if (!c.vatRate) { const dv = defaultVat(row.acc); if (dv) put('vat', 'VAT', flatRateVat(row.direction, dv)); }
     }
   }
