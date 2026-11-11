@@ -479,7 +479,7 @@
     color: #fff;
     border-color: var(--text);
   }
-  .btn-primary:hover { opacity: 0.85; }
+  .btn-primary:hover { background: var(--text); border-color: var(--text); opacity: 0.85; }
   .btn-primary:disabled {
     opacity: 0.35;
     cursor: not-allowed;
@@ -552,6 +552,33 @@
     border-color: var(--text);
     background: #fff;
   }
+
+  /* ── INSTRUCTIONS FOR THE ROWS ── */
+  .row-instructions {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--blue);
+    border-radius: var(--radius-lg); padding: 14px 16px; margin: 0 0 16px;
+  }
+  .row-instructions h3 { margin: 0; font-size: 13px; letter-spacing: 0.04em; }
+  .row-instructions .cq-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .row-instructions .cq-hint { margin: 6px 0 10px; font-size: 12px; color: var(--text-muted); }
+  .row-instructions .ri-input { display: flex; gap: 8px; align-items: stretch; }
+  .row-instructions textarea {
+    flex: 1; min-width: 0; box-sizing: border-box; resize: vertical; font: 13px/1.5 inherit; font-family: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px;
+  }
+  .row-instructions textarea:focus { outline: none; border-color: var(--text); background: #fff; }
+  .row-instructions .ri-status { margin-top: 8px; font-size: 12px; color: var(--blue); }
+  .row-instructions .ri-status:empty { display: none; }
+  .row-instructions .ri-list { margin-top: 10px; max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  .row-instructions .ri-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; font-size: 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .row-instructions .ri-item:last-child { border-bottom: none; }
+  .row-instructions .ri-item input { margin-top: 2px; }
+  .row-instructions .ri-what { font-weight: 500; }
+  .row-instructions .ri-why { color: var(--text-muted); }
+  .row-instructions .ri-del { color: var(--red); font-weight: 500; }
+  .row-instructions s { color: var(--text-faint); }
+  .row-instructions .ri-buttons { display: flex; gap: 8px; margin-top: 10px; }
+  @media (max-width: 600px) { .row-instructions .ri-input { flex-direction: column; } }
 
   /* ── QUESTIONS FOR THE CLIENT ── */
   .client-queries {
@@ -934,6 +961,21 @@
   <div class="table-footer-actions">
     <button class="btn" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge selected rows</button>
     <button class="btn btn-add" onclick="addBlankRow()">+ Add row</button>
+  </div>
+
+  <!-- INSTRUCTIONS FOR THE ROWS -->
+  <div class="row-instructions" id="rowInstructionBox" style="display:none">
+    <div class="cq-head">
+      <h3>INSTRUCTIONS FOR THESE ROWS</h3>
+      <button class="btn" type="button" id="rowInstructionUndoBtn" onclick="undoRowInstruction()" style="display:none" title="Put the rows the last instruction changed back as they were">↶ Undo last instruction</button>
+    </div>
+    <p class="cq-hint">Tell Claude what to change in plain English, e.g. <em>"For the Wandsworth council tax lines use the full bill (e.g. £54.60), not the client's 30%"</em> or <em>"Code all TfL and Oyster lines to travel"</em>. You'll see each change before anything is applied. <span id="rowInstructionScope"></span></p>
+    <div class="ri-input">
+      <textarea id="rowInstructionText" rows="2" placeholder="Type an instruction…" aria-label="Instruction for the rows" onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();runRowInstruction();}"></textarea>
+      <button class="btn btn-primary" type="button" id="rowInstructionBtn" onclick="runRowInstruction()" title="Ctrl+Enter">Ask Claude</button>
+    </div>
+    <div class="ri-status" id="rowInstructionStatus" role="status"></div>
+    <div id="rowInstructionPreview"></div>
   </div>
 
   <!-- QUESTIONS FOR THE CLIENT -->
@@ -5786,6 +5828,7 @@ function toggleRowSelect(id, checked) {
   if (!row) return;
   row._selected = checked;
   updateMergeButton();
+  updateRowInstructionBox();
 }
 
 function updateMergeButton() {
@@ -6387,6 +6430,7 @@ function updateUI() {
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
   updateAddMoreButtons();
+  updateRowInstructionBox();
   renderClientQueries();
 }
 
@@ -6565,6 +6609,278 @@ window.addEventListener('beforeunload', e => {
 });
 
 
+// ── INSTRUCTIONS FOR THE ROWS ───────────────────────────────────────────────
+// After extraction, the accountant can type an instruction in plain English
+// ("for the council tax lines use the full bill, e.g. £54.60, not the
+// client's 30%", "code all the TfL lines to travel", "Niklas is a
+// subcontractor"). Claude reads the rows (only the selected ones, if any are
+// ticked) and replies with the changes it would make to each row. These are
+// shown first, each with a tick box, and nothing changes until "Apply" is
+// pressed. Every change applied is written in the row's Notes, and
+// "Undo" puts the rows back as they were.
+
+const ROW_INSTRUCTION_BATCH = 300;   // rows per request
+let rowInstructionPending = null;    // { instruction, proposals: [{ id, set, del, reason, diffs }] }
+let rowInstructionUndo = null;       // { snapshots: [{ row, index }], count }
+
+const ROW_CHANGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    changes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          delete: { type: 'boolean' },
+          accountCode: nullable({ type: 'string' }),
+          vatRate: nullable({ type: 'string', enum: VAT_RATES }),
+          gross: nullable({ type: 'number' }),
+          businessUsePercent: nullable({ type: 'number' }),
+          useOfHome: nullable({ type: 'boolean' }),
+          date: nullable({ type: 'string' }),
+          description: nullable({ type: 'string' }),
+          supplier: nullable({ type: 'string' }),
+          reference: nullable({ type: 'string' }),
+          direction: nullable({ type: 'string', enum: ['in', 'out'] }),
+          reason: { type: 'string' },
+        },
+        required: ['id', 'delete', 'accountCode', 'vatRate', 'gross', 'businessUsePercent', 'useOfHome', 'date', 'description', 'supplier', 'reference', 'direction', 'reason'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['summary', 'changes'],
+  additionalProperties: false,
+};
+
+// The rows an instruction works on: the ticked ones if any, else all
+// (sales invoice lines are kept as printed, so they're never included).
+function rowsForInstruction() {
+  const codable = rows.filter(r => r.kind !== 'sale');
+  const picked = codable.filter(r => r._selected);
+  return picked.length ? { list: picked, selectedOnly: true } : { list: codable, selectedOnly: false };
+}
+
+function rowForPrompt(r) {
+  return JSON.stringify({
+    id: r.id, date: r.date || '', description: r.desc || '', supplier: r.supplier || '', reference: r.ref || '',
+    account: r.acc || '', vat: r.vat || '', gross: r.gross === '' ? null : Number(r.gross),
+    businessUsePercent: r.bu === '' || r.bu === undefined ? null : Number(r.bu), useOfHome: !!r.home,
+    direction: r.fromBank ? r.direction : 'out', notes: r.notes || '',
+  });
+}
+
+function buildRowInstructionPrompt(instruction, list, selectedOnly) {
+  return `You are helping a UK accountant tidy rows extracted from a self-employed client's records before they are imported into Xero. The accountant has given an instruction. Work out which rows it applies to and what to change on each.
+
+THE ACCOUNTANT'S INSTRUCTION:
+"""${instruction}"""
+
+How to answer:
+- Return one entry in "changes" for each row the instruction applies to, and nothing for any other row. ${selectedOnly ? 'The accountant ticked these rows, so the instruction is about them.' : 'Only change rows the instruction clearly covers. If it names a figure or wording ("the £54.60 lines", "Wandsworth"), match it against the description and notes.'}
+- In each entry, give only the fields that change. Every field you don't change must be null. Don't restate a field's current value.
+- "gross" is the amount as a positive number. The client's own sums are in the description (e.g. "Wandsworth £54.60 x 30% = £26.30" is a bill of £54.60, of which the client claimed 30%). When the accountant says to use the bill's figure, the gross is that figure (54.60). Take a figure only from the row's own wording or the instruction, and never make one up.
+- "businessUsePercent" (1–100) is the share of the gross that's business. It isn't used on a Use of Home account, where the Use of Home calculator applies its own %. Give 100 to remove a reduction.
+- "useOfHome" true applies the Use of Home calculator's % to a row that isn't on a Use of Home account.
+- "accountCode" must be a code from the chart below. "vatRate" must be one of: ${VAT_RATES.join(', ')}.
+- "date" is in YYYY-MM-DD format. "direction" is "in" for money received and "out" for money paid.
+- "delete" is true only when the instruction says to remove the row. Otherwise it is false.
+- "reason" is a few words a person can check, e.g. "Use the full bill £54.60 from the description".
+- "summary" is one sentence on what you changed. If the instruction is unclear, or matches no rows, return no changes and say why.
+
+CHART OF ACCOUNTS:
+${buildChartOfAccountsText()}${extraInstructionsBlock()}
+
+ROWS (${list.length}${selectedOnly ? ', the ones the accountant ticked' : ''}), one JSON object per line:
+${list.map(rowForPrompt).join('\n')}`;
+}
+
+// Applies one proposed change to a row object (or a copy of one) and
+// returns what changed, as [{ label, from, to }].
+function applyRowChange(row, c) {
+  const diffs = [];
+  const show = v => v === '' || v === null || v === undefined ? '—' : String(v);
+  const money = v => v === '' || v === null || v === undefined || isNaN(Number(v)) ? show(v) : fmtMoney(Number(v));
+  const put = (field, label, value) => {
+    if (String(row[field] ?? '') === String(value ?? '')) return;
+    const f = field === 'gross' ? money : field === 'bu' ? (v => v === '' ? '100%' : `${v}%`) : show;
+    diffs.push({ label, from: f(row[field]), to: f(value) });
+    row[field] = value;
+  };
+  if (c.direction && row.fromBank) put('direction', 'Money', c.direction);
+  if (c.accountCode) {
+    const a = ACCOUNTS.find(x => x.code === String(c.accountCode).trim());
+    if (a) {
+      put('acc', 'Account', `${a.code} - ${a.name}`);
+      if (!c.vatRate) { const dv = defaultVat(row.acc); if (dv) put('vat', 'VAT', flatRateVat(row.direction, dv)); }
+    }
+  }
+  if (c.vatRate && VAT_RATES.includes(c.vatRate)) put('vat', 'VAT', flatRateVat(row.direction, c.vatRate));
+  if (typeof c.gross === 'number' && isFinite(c.gross)) put('gross', 'Gross', round2(Math.abs(c.gross)));
+  if (typeof c.businessUsePercent === 'number' && c.businessUsePercent > 0 && c.businessUsePercent <= 100 && !isHome213(row.acc)) {
+    put('bu', '% BU', c.businessUsePercent >= 100 ? '' : round2(c.businessUsePercent));
+  }
+  if (typeof c.useOfHome === 'boolean' && !isHome213(row.acc)) put('home', 'Use of Home', c.useOfHome);
+  if (c.date && /^\d{4}-\d{2}-\d{2}$/.test(c.date)) put('date', 'Date', c.date);
+  if (typeof c.description === 'string' && c.description.trim()) put('desc', 'Description', c.description.trim());
+  if (typeof c.supplier === 'string') put('supplier', 'Supplier', c.supplier.trim());
+  if (typeof c.reference === 'string') put('ref', 'Ref', c.reference.trim());
+  return diffs;
+}
+
+async function runRowInstruction() {
+  const ta = document.getElementById('rowInstructionText');
+  const btn = document.getElementById('rowInstructionBtn');
+  const status = document.getElementById('rowInstructionStatus');
+  const instruction = ta.value.trim();
+  if (!instruction) { status.textContent = 'Type an instruction first.'; return; }
+  const { list, selectedOnly } = rowsForInstruction();
+  if (!list.length) { status.textContent = 'There are no rows to change.'; return; }
+  const { sample } = await getCaps();
+  if (!sample) { status.textContent = 'Asking Claude is not available in this view.'; return; }
+
+  btn.disabled = true;
+  rowInstructionPending = null;
+  renderRowInstructionPreview();
+  const batches = [];
+  for (let i = 0; i < list.length; i += ROW_INSTRUCTION_BATCH) batches.push(list.slice(i, i + ROW_INSTRUCTION_BATCH));
+  const proposals = [], summaries = [], failed = [];
+  try {
+    for (let b = 0; b < batches.length; b++) {
+      status.textContent = `Asking Claude about ${list.length} ${selectedOnly ? 'ticked ' : ''}row${list.length !== 1 ? 's' : ''}${batches.length > 1 ? ` (part ${b + 1} of ${batches.length})` : ''}…`;
+      let reply;
+      try {
+        reply = await sample.json(buildRowInstructionPrompt(instruction, batches[b], selectedOnly), { schema: ROW_CHANGE_SCHEMA, modelTier: 'default', cache: false });
+      } catch (e) { failed.push(sampleErrorMessage(e)); continue; }
+      if (reply && reply.summary) summaries.push(reply.summary);
+      const allowed = new Set(batches[b].map(r => r.id));
+      (reply && Array.isArray(reply.changes) ? reply.changes : []).forEach(c => {
+        const row = rows.find(r => r.id === c.id);
+        if (!row || !allowed.has(c.id) || proposals.some(p => p.id === c.id)) return;
+        if (c.delete) { proposals.push({ id: c.id, del: true, set: c, reason: c.reason || '', diffs: [], on: true }); return; }
+        const diffs = applyRowChange({ ...row }, c);
+        if (diffs.length) proposals.push({ id: c.id, del: false, set: c, reason: c.reason || '', diffs, on: true });
+      });
+    }
+  } finally {
+    btn.disabled = false;
+  }
+  const lead = [summaries.join(' '), failed.length ? `${failed.length} part${failed.length !== 1 ? 's' : ''} couldn't be read (${failed[0]}).` : ''].filter(Boolean).join(' ');
+  status.textContent = proposals.length
+    ? `${lead} Check the ${proposals.length} change${proposals.length !== 1 ? 's' : ''} below, then press Apply.`
+    : (lead || 'No rows need changing for that instruction.');
+  rowInstructionPending = proposals.length ? { instruction, proposals } : null;
+  renderRowInstructionPreview();
+}
+
+function renderRowInstructionPreview() {
+  const box = document.getElementById('rowInstructionPreview');
+  if (!box) return;
+  const p = rowInstructionPending;
+  if (!p) { box.innerHTML = ''; return; }
+  const items = p.proposals.map((c, i) => {
+    const row = rows.find(r => r.id === c.id);
+    const what = row ? `${row.date ? row.date.split('-').reverse().join('/') + ' · ' : ''}${row.desc || row.supplier || 'Row'}` : 'Row';
+    const detail = c.del ? '<span class="ri-del">Delete this row</span>'
+      : c.diffs.map(d => `${esc(d.label)}: <s>${esc(d.from)}</s> → <strong>${esc(d.to)}</strong>`).join(' · ');
+    return `<label class="ri-item"><input type="checkbox" ${c.on ? 'checked' : ''} onchange="rowInstructionPending.proposals[${i}].on=this.checked;updateRowInstructionApply()">
+      <span><span class="ri-what">${esc(what)}</span><br>${detail}${c.reason ? `<span class="ri-why"> — ${esc(c.reason)}</span>` : ''}</span></label>`;
+  }).join('');
+  box.innerHTML = `<div class="ri-list">${items}</div>
+    <div class="ri-buttons">
+      <button class="btn btn-primary" type="button" id="rowInstructionApplyBtn" onclick="applyRowInstruction()"></button>
+      <button class="btn" type="button" onclick="rowInstructionPending=null;renderRowInstructionPreview();document.getElementById('rowInstructionStatus').textContent='Changes discarded.'">Discard</button>
+    </div>`;
+  updateRowInstructionApply();
+}
+
+function updateRowInstructionApply() {
+  const btn = document.getElementById('rowInstructionApplyBtn');
+  if (!btn || !rowInstructionPending) return;
+  const n = rowInstructionPending.proposals.filter(c => c.on).length;
+  btn.textContent = `Apply ${n} change${n !== 1 ? 's' : ''}`;
+  btn.disabled = !n;
+}
+
+function rerenderRow(row) {
+  const tr = document.getElementById('tr_' + row.id);
+  if (!tr) return;
+  tr.innerHTML = buildRowHTML(row);
+  tr.classList.toggle('needs-attention', rowNeedsAttention(row));
+  tr.classList.toggle('income-row', !!(row.fromBank && row.direction === 'in'));
+}
+
+function applyRowInstruction() {
+  const p = rowInstructionPending;
+  if (!p) return;
+  const chosen = p.proposals.filter(c => c.on);
+  const snapshots = [];
+  const short = p.instruction.length > 60 ? p.instruction.slice(0, 57) + '…' : p.instruction;
+  chosen.forEach(c => {
+    const index = rows.findIndex(r => r.id === c.id);
+    if (index < 0) return;
+    const row = rows[index];
+    snapshots.push({ row: { ...row, clientQuery: [...(row.clientQuery || [])] }, index });
+    if (c.del) { removeRow(row.id); return; }
+    const before = { acc: row.acc, vat: row.vat };
+    const diffs = applyRowChange(row, c.set);
+    if (!diffs.length) return;
+    row.notes = joinNotes([row.notes, `Changed by your instruction "${short}": ${diffs.map(d => `${d.label} ${d.from} → ${d.to}`).join(', ')}`]);
+    rerenderRow(row);
+    if (row.acc !== before.acc || row.vat !== before.vat) recordUserCorrection(row);
+  });
+  rowInstructionUndo = snapshots.length ? { snapshots, count: snapshots.length } : null;
+  rowInstructionPending = null;
+  renderRowInstructionPreview();
+  checkHomeRows();
+  updateUI();
+  const status = document.getElementById('rowInstructionStatus');
+  status.textContent = `${snapshots.length} row${snapshots.length !== 1 ? 's' : ''} changed. Each change is written in the row's Notes.`;
+  document.getElementById('rowInstructionUndoBtn').style.display = rowInstructionUndo ? '' : 'none';
+}
+
+// Puts the rows the last instruction changed (or deleted) back as they were.
+function undoRowInstruction() {
+  const u = rowInstructionUndo;
+  if (!u) return;
+  const tbody = document.getElementById('expBody');
+  u.snapshots.slice().sort((a, b) => a.index - b.index).forEach(({ row, index }) => {
+    const at = rows.findIndex(r => r.id === row.id);
+    if (at >= 0) {
+      rows[at] = row;
+      rerenderRow(row);
+    } else {
+      // A deleted row goes back where it was.
+      const pos = Math.min(index, rows.length);
+      rows.splice(pos, 0, row);
+      const tr = document.createElement('tr');
+      tr.id = 'tr_' + row.id;
+      tbody.insertBefore(tr, rows[pos + 1] ? document.getElementById('tr_' + rows[pos + 1].id) : null);
+      rerenderRow(row);
+      showTable();
+    }
+  });
+  rowInstructionUndo = null;
+  document.getElementById('rowInstructionUndoBtn').style.display = 'none';
+  document.getElementById('rowInstructionStatus').textContent = `Undone — ${u.count} row${u.count !== 1 ? 's' : ''} put back as they were.`;
+  checkHomeRows();
+  updateUI();
+}
+
+// Shown once there are rows; the hint says whether ticked rows or all rows
+// will be read.
+function updateRowInstructionBox() {
+  const box = document.getElementById('rowInstructionBox');
+  if (!box) return;
+  const { list, selectedOnly } = rowsForInstruction();
+  box.style.display = list.length || rowInstructionPending || rowInstructionUndo ? 'block' : 'none';
+  const scope = document.getElementById('rowInstructionScope');
+  if (scope) scope.textContent = selectedOnly ? `Applies to the ${list.length} ticked row${list.length !== 1 ? 's' : ''}.` : `Applies to all ${list.length} rows. Tick rows in the Merge column to limit it to those.`;
+}
+
+
 // ── THINGS IN THE CLIENT'S SHEET TO CHECK ───────────────────────────────────
 // Questions about the client's own records (a sum that doesn't add up, a
 // cost with no amount, a month whose total doesn't match its lines), worded
@@ -6629,6 +6945,10 @@ async function copyClientQueries() {
 function clearAll() {
   rows = []; nextId = 0;
   fileClientQueries = []; clientQueriesEdited = false;
+  rowInstructionPending = null; rowInstructionUndo = null;
+  renderRowInstructionPreview();
+  const riUndo = document.getElementById('rowInstructionUndoBtn'); if (riUndo) riUndo.style.display = 'none';
+  const riStatus = document.getElementById('rowInstructionStatus'); if (riStatus) riStatus.textContent = '';
   salesInvoices = [];
   renderSalesTable();
   document.getElementById('expBody').innerHTML = '';
