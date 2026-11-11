@@ -7245,7 +7245,10 @@ async function triggerDownload(content, fname) {
       setAlert('File downloads aren\'t available in this view.', 'warn');
       return false;
     }
-    const blob = new Blob([content], {type:'text/csv'});
+    // A UTF-8 byte-order mark first, as Excel's own "CSV UTF-8" files have:
+    // without it Excel reads the file as Windows-1252 and shows "£" as "Â£".
+    // Xero imports files with or without it.
+    const blob = new Blob(['\uFEFF' + String(content).replace(/^\uFEFF/, '')], {type:'text/csv;charset=utf-8'});
     const result = await downloads.save({ filename: fname, data: blob });
     return result.status === 'saved' || result.status === 'delivered';
   } catch (err) {
