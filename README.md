@@ -13,6 +13,7 @@ It is a single web page with no server, hosted free on **GitHub Pages**. It's bu
 - **What it reads**: in step ②, drop in any mix of:
   - the firm's expense template (.xlsx);
   - the Self Assessment template (.xlsx with Income and Expenses sheets). Every line is read as typed, dates such as `8.04` become 8 April in the sheet's "Year End" tax year, and Claude only chooses the account;
+  - a client's own book kept as a report per month (.xlsx): a title row with the period ("… REPORT - 21/03/2025-20/04/2025"), the headings Business Earnings | TOTAL | Business Expenses | TOTAL, and a row per day ("Mar' 21", then 22, 23 …). Every line is read as typed, with its real date worked out from the block; lines outside the tax year (from the period-end date, or a file name ending "… to 5th April 2026") are left out and counted. A cost with its amount only in the wording ("Helper £150") takes it from there, the client's own sums ("£25 x 50% = £12.50") are checked and treated as already the business share, each month's lines are checked against its total row, and the category "Breakdown" columns aren't read, so nothing is counted twice;
   - bank statements and transaction lists (.csv or .xlsx). These are read line by line, and the Description and amount come from the file;
   - bank statement PDFs with text in columns (e.g. Starling's monthly statement). Each line is read exactly as printed, amounts are put in or out by their column, and the totals are checked against the statement's own summary;
   - chambers bills and receipts (PDF, PNG, JPG);
