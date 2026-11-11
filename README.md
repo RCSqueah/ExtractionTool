@@ -4,6 +4,10 @@ A browser tool that turns a client's documents (expense templates and lists, ban
 
 Under the Extracted Rows, a **Things in the client's sheet to check** box lists questions about the client's own records (sums that don't add up, costs with no amount, a month whose lines don't match its total, an unclear business-use %), worded so you can copy them straight into an email to the client. You can edit the text, and deleting a row drops its question.
 
+Above the Extracted Rows, a bar reads **Tick rows, then: Merge · Delete · ↶ Undo**. Each row has one tick box, and the box in the heading ticks every row. **Undo** reverses the last merge, delete or instruction, and pressing it again goes further back. The table scrolls in its own box, so the column headings stay in view.
+
+Under the Extracted Rows, **Instructions for these rows** lets you tell Claude in plain English what to change, e.g. *"for the council tax lines use the full bill (£54.60), not the client's 30%"* or *"code all TfL lines to travel"*. It works on the ticked rows, or on all rows if none are ticked. Every proposed change is listed with a tick box before anything is applied. Applied changes are written in each row's Notes, and **↶ Undo** above the table puts the rows back.
+
 Features include a per-client chart of accounts learned from a Xero export, remembered coding history, a use-of-home calculator, business-use % adjustments, row merging, and supplier VAT overrides.
 
 ## How it works
