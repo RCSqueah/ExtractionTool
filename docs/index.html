@@ -6079,7 +6079,7 @@ function buildRowHTML(row) {
     </td>
     <td class="no-strike">
       ${isHome213(row.acc)
-        ? `<span class="use-home-btn active${homeAdjApplies ? '' : ' unadjusted'}" style="cursor:default;opacity:0.85" title="${homeAdjApplies ? 'Home proportion applied automatically: ' + getHomePct().toFixed(2) + '% of gross' : 'VAT rate is not 5% or 20% — Use of Home figure kept at full gross amount (no proportion applied)'}">${homeAdjApplies ? '⌂ AUTO' : '⌂ FULL'}</span>`
+        ? `<span class="use-home-btn active${homeAdjApplies ? '' : ' unadjusted'}" style="cursor:default;opacity:0.85" title="${homeAdjApplies ? 'Home proportion applied automatically: ' + getHomePct().toFixed(2) + '% of gross' : 'VAT rate is Exempt or Zero Rated — Use of Home figure kept at full gross amount (no proportion applied)'}">${homeAdjApplies ? '⌂ AUTO' : '⌂ FULL'}</span>`
         : `<button class="use-home-btn${row.home?' active':''}" id="homeBtn_${id}" onclick="toggleHome(${id})" title="${row.home ? 'Applying ' + getHomePct().toFixed(2) + '% (from the Use of Home calculator above) — click to remove' : 'Click to apply the Use of Home business proportion (' + getHomePct().toFixed(2) + '%, set in the calculator above) to this row'}">${row.home?'⌂ ON':'⌂'}</button>`
       }
     </td>
@@ -6321,10 +6321,11 @@ function isHome213(acc) {
   return /use of home|home as an office|home office/i.test(entry.name);
 }
 
-// The Use of Home (213) proportion adjustment should only be applied when the
-// VAT rate is one of the reclaimable rates (5%, 20%). For No VAT, Exempt,
-// or Zero Rated rows, the figure is kept at the full gross amount, unadjusted.
-const HOME_ADJUST_VAT_RATES = ['20% (VAT on Expenses)', '5% (VAT on Expenses)'];
+// The Use of Home (213) proportion is applied to rows at 5%, 20% or No VAT
+// (e.g. a household bill from a non-VAT client, or one on the Flat Rate
+// Scheme). Exempt and Zero Rated rows are kept at the full gross amount,
+// unadjusted.
+const HOME_ADJUST_VAT_RATES = ['20% (VAT on Expenses)', '5% (VAT on Expenses)', 'No VAT'];
 function homeAdjustmentApplies(vat) {
   return HOME_ADJUST_VAT_RATES.includes(vat);
 }
@@ -6335,7 +6336,7 @@ function calcNet(gross, bu, home, acc, vat) {
     if (homeAdjustmentApplies(vat)) {
       amt = amt * (getHomePct() / 100);
     }
-    // else: VAT rate isn't 5%/20% — leave the figure at the full gross amount
+    // else: Exempt / Zero Rated — leave the figure at the full gross amount
   } else {
     if (bu !== '' && bu !== null) {
       const buPct = parseFloat(bu);
@@ -7120,7 +7121,7 @@ function buildBillsCSVData() {
       if (homeAdjustmentApplies(vat)) {
         descOut += ` @ ${getHomePct().toFixed(2)}% business use (home)`;
       } else {
-        descOut += ` (Use of Home — VAT not recoverable, full amount)`;
+        descOut += ` (Use of Home — full amount)`;
       }
     } else {
       if (bu !== '' && bu !== null && parseFloat(bu) !== 100) {
@@ -7198,7 +7199,7 @@ function buildBankCSVData() {
       if (homeAdjustmentApplies(vat)) {
         descOut += ` @ ${getHomePct().toFixed(2)}% business use (home)`;
       } else {
-        descOut += ` (Use of Home — VAT not recoverable, full amount)`;
+        descOut += ` (Use of Home — full amount)`;
       }
     } else {
       if (bu !== '' && bu !== null && parseFloat(bu) !== 100) {
