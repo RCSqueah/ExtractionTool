@@ -553,6 +553,23 @@
     background: #fff;
   }
 
+  /* ── QUESTIONS FOR THE CLIENT ── */
+  .client-queries {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--amber);
+    border-radius: var(--radius-lg); padding: 14px 16px; margin: 0 0 20px;
+  }
+  .client-queries .cq-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .client-queries h3 { margin: 0; font-size: 13px; letter-spacing: 0.04em; }
+  .client-queries .cq-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .client-queries .cq-edited { font-size: 11px; color: var(--amber); }
+  .client-queries .cq-hint { margin: 6px 0 10px; font-size: 12px; color: var(--text-muted); }
+  .client-queries textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+    font: 13px/1.5 inherit; font-family: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
+  }
+  .client-queries textarea:focus { outline: none; border-color: var(--text); background: #fff; }
+
   /* ── UNIFIED UPLOAD ── */
   .table-footer-actions {
     display: flex;
@@ -917,6 +934,20 @@
   <div class="table-footer-actions">
     <button class="btn" id="mergeRowsBtn" onclick="mergeSelectedRows()" disabled>Merge selected rows</button>
     <button class="btn btn-add" onclick="addBlankRow()">+ Add row</button>
+  </div>
+
+  <!-- QUESTIONS FOR THE CLIENT -->
+  <div class="client-queries" id="clientQueriesBox" style="display:none">
+    <div class="cq-head">
+      <h3>THINGS IN THE CLIENT'S SHEET TO CHECK</h3>
+      <div class="cq-actions">
+        <span id="cqEdited" class="cq-edited" style="display:none">Edited by you · rows have changed since</span>
+        <button class="btn" type="button" id="cqRebuildBtn" onclick="renderClientQueries(true)" style="display:none" title="Replace the text below with the questions for the rows as they are now — your edits are lost">↻ Rebuild from rows</button>
+        <button class="btn" type="button" id="cqCopyBtn" onclick="copyClientQueries()">⧉ Copy for email</button>
+      </div>
+    </div>
+    <p class="cq-hint">Questions about the client's own records, worded to paste into an email. Edit freely. Deleting a row drops its question.</p>
+    <textarea id="clientQueriesText" rows="10" spellcheck="true" aria-label="Things in the client's sheet to check" oninput="clientQueriesEdited = true"></textarea>
   </div>
 
   <!-- SUMMARY -->
@@ -3892,6 +3923,269 @@ function buildSaTemplateStatement(sheets, periodEndISO) {
   return { stmt, note: notes.join(' ') };
 }
 
+// ── MONTHLY REPORT WORKBOOK (a block per month, a row per day) ──────────────
+// A client's own income-and-expenses book kept as one report per month (or
+// per 21st-to-20th period) on a single sheet: a title row giving the
+// period ("… REPORT - 21/03/2025-20/04/2025"), the headings "Business
+// Earnings | TOTAL | Business Expenses | TOTAL", then a row per day — the
+// day column says "Mar' 21" or "Apr' 1" where a month starts and just the
+// day number (22, 23, …) after that — with a customer and amount on the
+// left and a cost and amount on the right. Each block ends with its total
+// row(s). Further columns to the right (a "Breakdown" by category) only
+// summarise the same costs, so they're not read.
+// Every line is read here, exactly as typed, with its real date worked out
+// from the block's period, and goes through the same line-by-line reader
+// as a bank statement, where Claude only codes it.
+
+const REPORT_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// The columns of a monthly report's heading row, or null if it isn't one.
+function monthlyReportColumns(row) {
+  const cells = row.map(c => String(c || '').trim().toLowerCase());
+  const earn = cells.findIndex(c => /^(business\s+)?(earnings|income|takings|sales)$/.test(c));
+  const exp = cells.findIndex(c => /^(business\s+)?(expenses|expenditure|costs)$/.test(c));
+  if (earn < 0 || exp < 0 || exp <= earn) return null;
+  const amountAfter = i => /^(total|amount|£|value)$/.test(cells[i + 1] || '') ? i + 1 : -1;
+  const earnAmt = amountAfter(earn), expAmt = amountAfter(exp);
+  if (earnAmt < 0 || expAmt < 0) return null;
+  return { day: 0, earn, earnAmt, exp, expAmt };
+}
+
+// The period a block's title row states ("21/03/2025-20/04/2025",
+// "21/10/2025 - 20/11/2025"), as { start, end } ISO dates, or null.
+function monthlyReportPeriod(row) {
+  const text = row.map(c => String(c || '')).join(' ');
+  const m = text.match(/(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})\s*(?:-|–|to)\s*(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})/i);
+  if (!m || !validDayMonth(+m[1], +m[2]) || !validDayMonth(+m[4], +m[5])) return null;
+  const iso = (d, mo, y) => `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  return { start: iso(+m[1], +m[2], +m[3]), end: iso(+m[4], +m[5], +m[6]), title: text.trim() };
+}
+
+// True for a workbook laid out as monthly report blocks.
+function looksLikeMonthlyReport(sheets) {
+  return sheets.some(sh => sh.rows.some((r, i) => monthlyReportColumns(r)
+    && sh.rows.slice(Math.max(0, i - 3), i).some(p => monthlyReportPeriod(p))));
+}
+
+function reportMonth(word) {
+  const w = String(word || '').toLowerCase().replace(/[^a-z]/g, '');
+  const i = REPORT_MONTHS.indexOf(w.slice(0, 3));
+  return i >= 0 && w.length >= 3 ? i + 1 : 0;
+}
+
+// Reads a day-column cell: "Mar' 21" / "March 21" / "21 Mar" (a month and
+// day), "22" (a day in the current month), or a real date. Returns
+// { day, month?, year? } or null.
+function readReportDay(raw) {
+  const t = String(raw ?? '').trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return { year: +m[1], month: +m[2], day: +m[3] };
+  m = t.match(/^([a-z]{3,9})\.?\s*['’`]?\s*(\d{1,2})(?:st|nd|rd|th)?$/i);
+  if (m && reportMonth(m[1])) return { month: reportMonth(m[1]), day: +m[2] };
+  m = t.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,9})\.?$/i);
+  if (m && reportMonth(m[2])) return { month: reportMonth(m[2]), day: +m[1] };
+  m = t.match(/^(\d{1,2})(?:\.0+)?$/);
+  if (m) return { day: +m[1] };
+  return null;
+}
+
+// "£" figures in a line's wording, for a line whose amount cell is empty or
+// to check one that isn't: "… = £12.50" (the client's own result), "£25 x
+// 50%" (worked out), "£5.86 + 5.86" (added up) or a lone "£150". Returns
+// { amount, stated, pct, of } or null when the wording has no clear figure.
+function reportWordingAmount(text) {
+  const t = String(text || '');
+  const num = s => parseFloat(String(s).replace(/,/g, ''));
+  const round = n => Math.round(n * 100) / 100;
+  const pctM = t.match(/£\s*(\d[\d,]*(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*%/i);
+  const eq = t.match(/=\s*£?\s*(\d[\d,]*(?:\.\d+)?)\s*$/);
+  if (eq) return { amount: num(eq[1]), stated: true, pct: pctM ? num(pctM[2]) : null, of: pctM ? num(pctM[1]) : null };
+  if (pctM) return { amount: round(num(pctM[1]) * num(pctM[2]) / 100), pct: num(pctM[2]), of: num(pctM[1]) };
+  const chains = t.match(/£\s*\d[\d,]*(?:\.\d+)?(?:\s*\+\s*£?\s*\d[\d,]*(?:\.\d+)?)*/g);
+  if (!chains || chains.length !== 1) return null;
+  const parts = chains[0].match(/\d[\d,]*(?:\.\d+)?/g).map(num);
+  return { amount: round(parts.reduce((s, n) => s + n, 0)), added: parts.length > 1 };
+}
+
+const isoOf = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+const taxYearOf = iso => { const y = +iso.slice(0, 4), md = iso.slice(5); return md >= '04-06' ? y : y - 1; };
+const fmtMoney = n => `£${(Math.round(n * 100) / 100).toFixed(2)}`;
+// Money as the client would write it: £2,923.32.
+const clientMoney = n => `£${(Math.round(n * 100) / 100).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// Builds the statement for a monthly-report workbook: every income and cost
+// line of the chosen tax year, dated, with anything the accountant should
+// check in the Section (Notes) column. Returns { stmt, note }.
+function buildMonthlyReportStatement(sheets, periodEndISO, fileName) {
+  const header = ['Section', 'Report period', 'Day as typed', 'Date', 'Description', 'Amount', 'Money'];
+  const C = { period: 1, day: 2, date: 3, desc: 4, amount: 5, money: 6 };
+  const lines = [];       // every line read, before the tax year is chosen
+  const checks = [];      // block totals that don't match their lines
+  const fileQueries = []; // the same, worded for the client
+  let breakdownSkipped = false;
+
+  for (const sh of sheets) {
+    let block = null;
+    const closeBlock = () => {
+      if (!block) return;
+      // An amount only in the wording: does the period's own total include it?
+      const totalMatches = side => {
+        const own = block.total && block.total[side];
+        if (own === undefined || own === null) return null;
+        const read = block.lines.filter(l => l.money === side && typeof l.amount === 'number').reduce((s, l) => s + l.amount, 0);
+        return Math.abs(read - own) <= 0.005;
+      };
+      block.fromWording.forEach(w => {
+        w.ask[w.i] = totalMatches(w.money)
+          ? `the amount is only in the description, not the TOTAL column — please confirm it was ${clientMoney(w.amount)}`
+          : `there's no figure in the TOTAL column, so it isn't in that period's total — should ${clientMoney(w.amount)} be included?`;
+      });
+      if (!block.total) return;
+      for (const side of ['in', 'out']) {
+        const own = block.total[side];
+        if (own === undefined) continue;
+        const read = block.lines.filter(l => l.money === side && typeof l.amount === 'number').reduce((s, l) => s + l.amount, 0);
+        if (Math.abs(read - own) > 0.005) {
+          checks.push(`${block.label}: ${side === 'in' ? 'income' : 'expense'} lines add up to ${fmtMoney(read)} but the sheet's total says ${fmtMoney(own)}`);
+          fileQueries.push(`For ${block.label}, your ${side === 'in' ? 'income' : 'expense'} lines add up to ${clientMoney(read)}, but the total for that period says ${clientMoney(own)} — is anything missing or entered twice?`);
+        }
+      }
+    };
+    let pendingPeriod = null;
+    for (let i = 0; i < sh.rows.length; i++) {
+      const row = sh.rows[i].map(c => String(c ?? '').trim());
+      const period = monthlyReportPeriod(row);
+      if (period && !monthlyReportColumns(row)) { closeBlock(); block = null; pendingPeriod = period; continue; }
+      const cols = monthlyReportColumns(row);
+      if (cols) {
+        if (!pendingPeriod) continue;
+        if (row.slice(cols.expAmt + 1).some(Boolean)) breakdownSkipped = true;
+        const s = pendingPeriod.start;
+        const label = `${pendingPeriod.start.split('-').reverse().join('/')}–${pendingPeriod.end.split('-').reverse().join('/')}`;
+        block = { cols, period: pendingPeriod, label, lines: [], fromWording: [], total: null, y: +s.slice(0, 4), m: +s.slice(5, 7), d: +s.slice(8) - 1, dayRaw: '' };
+        pendingPeriod = null;
+        continue;
+      }
+      if (!block) continue;
+      const k = block.cols;
+      const earnText = row[k.earn] || '', earnAmt = row[k.earnAmt] || '';
+      const expText = row[k.exp] || '', expAmt = row[k.expAmt] || '';
+      const dayCell = row[k.day] || '';
+      // A total row: figures but no wording (the day cell may say "TOTAL").
+      if (!earnText && !expText && (earnAmt || expAmt) && (!dayCell || /^(grand\s+)?totals?$/i.test(dayCell))) {
+        if (!block.total) {
+          block.total = {};
+          if (!isNaN(parseAmount(earnAmt))) block.total.in = parseAmount(earnAmt);
+          if (!isNaN(parseAmount(expAmt))) block.total.out = parseAmount(expAmt);
+        }
+        continue;
+      }
+      const day = readReportDay(dayCell);
+      if (day) {
+        if (day.year) { block.y = day.year; block.m = day.month; }
+        else if (day.month) {
+          // A month label: the same or a later month than the block's start.
+          if (day.month < block.m) block.y++;
+          block.m = day.month;
+        } else if (day.day < block.d) {
+          // A day number lower than the last one: the next month has begun.
+          block.m++; if (block.m > 12) { block.m = 1; block.y++; }
+        }
+        block.d = day.day;
+        block.dayRaw = dayCell;
+      } else if (dayCell && !/^(grand\s+)?totals?$/i.test(dayCell)) {
+        block.dayRaw = dayCell;
+      }
+      for (const [text, amtRaw, money] of [[earnText, earnAmt, 'in'], [expText, expAmt, 'out']]) {
+        if (!text && !amtRaw) continue;
+        const notes = [], ask = [];
+        let date = '';
+        if (!block.dayRaw) { notes.push("No day on the sheet — the block's first day used, check"); ask.push('no day is given — what date should it be?'); }
+        if (block.d >= 1 && validDayMonth(block.d, block.m)) date = isoOf(block.y, block.m, block.d);
+        else if (block.d >= 29 && block.d <= 31 && block.m >= 1 && block.m <= 12) {
+          // The sheet lists 29–31 under every month; a day the month doesn't
+          // have goes on its last day.
+          const last = new Date(block.y, block.m, 0).getDate();
+          date = isoOf(block.y, block.m, last);
+          const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][block.m - 1];
+          notes.push(`Day ${block.d} isn't in ${mon} — dated the ${last}th, check`);
+          ask.push(`it's on ${block.d} ${mon}, which doesn't exist — which date should it be?`);
+        }
+        if (!date) { date = block.period.start; notes.push(`Day "${block.dayRaw}" not understood — the block's first day used, check`); ask.push(`we couldn't tell which day this was ("${block.dayRaw}") — what date should it be?`); }
+        else if (date < block.period.start || date > block.period.end) notes.push(`Date worked out as ${date.split('-').reverse().join('/')}, outside the block's period ${block.label} — check`);
+        const cell = parseAmount(amtRaw);
+        const worded = reportWordingAmount(text);
+        let amount = isNaN(cell) ? null : cell;
+        if (amount === null && amtRaw) { notes.push(`Amount "${amtRaw}" not understood — enter it`); ask.push(`the amount "${amtRaw}" isn't clear — how much was it?`); }
+        if (amount === null && !amtRaw && worded) {
+          amount = worded.amount;
+          notes.push(`Amount ${fmtMoney(amount)} taken from the wording — the sheet's amount column is blank, check`);
+          // Worded once the block's total is known (see closeBlock).
+          block.fromWording.push({ ask, i: ask.length, money, amount });
+          ask.push('');
+        }
+        if (amount !== null && worded && worded.stated && worded.pct == null && Math.abs(worded.amount - amount) > 0.005) {
+          notes.push(`The wording says ${fmtMoney(worded.amount)} but the amount column has ${fmtMoney(amount)} — the amount column is used, check`);
+          ask.push(`the description says ${clientMoney(worded.amount)} but the TOTAL column has ${clientMoney(amount)} — which is right?`);
+        }
+        if (worded && worded.pct !== null && worded.pct !== undefined) {
+          notes.push(`Client's ${worded.pct}% share of ${fmtMoney(worded.of)} — already the business share`);
+          // The client's own sum, checked: "£50 x 30% = £20" is really £15.
+          const right = worded.of * worded.pct / 100;
+          if (amount !== null && Math.abs(right - amount) > 0.02) {
+            notes.push(`${fmtMoney(worded.of)} × ${worded.pct}% is ${fmtMoney(right)}, not ${fmtMoney(amount)} — check`);
+            ask.push(`${worded.pct}% of ${clientMoney(worded.of)} is ${clientMoney(right)}, but ${clientMoney(amount)} is entered — which is right?`);
+          }
+        }
+        if (amount === 0) continue;
+        block.lines.push({ money, amount });
+        lines.push({ notes, ask, label: block.label, dayRaw: block.dayRaw, date, text: text || (money === 'in' ? 'Income' : 'Expense'), amount, money });
+      }
+    }
+    closeBlock();
+  }
+  if (!lines.length) throw new Error('No income or expense lines found in this monthly report.');
+
+  // The tax year: from the period-end date if set, else the file name's
+  // "… to 5th April 2026", else the year most of the lines fall in.
+  let start = null, how = '';
+  const pe = periodEndISO ? new Date(periodEndISO + 'T00:00:00') : null;
+  if (pe && !isNaN(pe)) { start = taxYearOf(periodEndISO); how = 'the period-end date'; }
+  if (start === null) {
+    const m = String(fileName || '').match(/5(?:th)?[\s_.-]*april[\s_.-]*(20\d{2})(?!.*20\d{2})/i);
+    if (m) { start = +m[1] - 1; how = 'the file name'; }
+  }
+  if (start === null) {
+    const count = {};
+    lines.forEach(l => { const y = taxYearOf(l.date); count[y] = (count[y] || 0) + 1; });
+    start = +Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+    how = 'the dates on the sheet';
+  }
+  const yearLabel = `${start}/${String(start + 1).slice(2)}`;
+  const inYear = lines.filter(l => taxYearOf(l.date) === start);
+  const outside = lines.filter(l => taxYearOf(l.date) !== start);
+
+  const records = inYear.map(l => [l.notes.join('; '), l.label, l.dayRaw, l.date, l.text, l.amount === null ? '' : String(l.amount), l.money]);
+  const stmt = {
+    header, records,
+    descCol: C.desc, descCols: [], dateCol: C.date, amountCol: C.amount, amountIsCost: false,
+    buCols: [], inCol: -1, outCol: -1,
+    moneyCol: C.money, payeeCol: -1, refCol: -1, fixedDates: true,
+    clientQueries: inYear.map(l => l.ask), fileQueries,
+    promptNote: `This is the client's own income-and-expenses book for tax year ${yearLabel}, kept as a report per month: each line is one day's job (money in — the customer or area cleaned) or one cost (money out), exactly as the client typed it. Money in/out is in the "Money" column. Each line's Date has already been worked out — return it unchanged. Where the client's wording works out a share (e.g. "Thames Water £25 x 50% = £12.50", "Council Tax £80 x 30%"), the Amount is ALREADY the business share: never set a business-use % for it. Household bills claimed at a share like that (water, gas/electricity, council tax, and broadband/landline if that's this client's usual coding) are Use of Home costs; a mobile phone bill at a share is telephone. A person's first name alone, or with "£120"-type figures, is usually someone paid to help on the day's work (direct costs / subcontractor, per this client's usual coding). Code each line to this client's own chart of accounts and usual coding above.`,
+  };
+  const notes = [`Read as a monthly report: tax year ${yearLabel} (from ${how}).`];
+  if (outside.length) {
+    const sum = side => outside.filter(l => l.money === side && typeof l.amount === 'number').reduce((s, l) => s + l.amount, 0);
+    const span = `${outside.map(l => l.date).sort()[0].split('-').reverse().join('/')}–${outside.map(l => l.date).sort().slice(-1)[0].split('-').reverse().join('/')}`;
+    notes.push(`${outside.length} line${outside.length !== 1 ? 's' : ''} dated outside ${yearLabel} left out (${span}: ${fmtMoney(sum('in'))} income, ${fmtMoney(sum('out'))} costs).`);
+  }
+  if (breakdownSkipped) notes.push('The "Breakdown" summary columns were not read — they repeat the daily costs.');
+  if (checks.length) notes.push(`Check: ${checks.join('; ')}.`);
+  return { stmt, note: notes.join(' ') };
+}
+
 // A workbook with one sheet per year (e.g. "2024-2025", "2025-2026"):
 // pick the sheet(s) for the UK tax year containing the period-end date, by
 // sheet name or the sheet's own "Year:" label. Returns { sheets, note };
@@ -4095,7 +4389,9 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const desc = original || t.description || '';
   const notes = [];
   if (section) notes.push(section);
-  if (fromFile && fromFile.missing) notes.push("No amount on the client's sheet — enter it");
+  // Questions for the client (see "Things in the client's sheet to check").
+  const ask = [...(opts.clientQuery || [])];
+  if (fromFile && fromFile.missing) { notes.push("No amount on the client's sheet — enter it"); if (original) ask.push('no amount is given — how much was it?'); }
   if (!original) notes.push(opts.unmatchedNote || "Couldn't match this to a statement line — Description is Claude's wording, check it");
   else if (t.description) notes.push(`Claude: ${t.description}`);
   if (direction === 'in') notes.push('Income');
@@ -4110,6 +4406,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
   const fileBu = opts.fileBu;
   if (fileBu && fileBu.tbc) {
     notes.push(`Business use is "${fileBu.raw}" on the client's sheet — decide the % before exporting`);
+    ask.push(`the business-use share is "${fileBu.raw}" — what percentage is for the business?`);
   } else if (fileBu && fileBu.pct !== undefined) {
     // The client's own % from the file; 100% needs no adjustment.
     if (fileBu.pct > 0 && fileBu.pct < 100 && !isHome213(accFull)) bu = fileBu.pct;
@@ -4151,6 +4448,7 @@ function mapBankRowToInternal(t, original, fromFile, section, opts = {}) {
     home: false,
     direction: direction,
     fromBank: true,
+    clientQuery: ask,
   };
 }
 
@@ -5038,6 +5336,7 @@ async function readStatementBatches(stmt, batches, label, onProgress) {
         fixedDate: !!(rec && stmt.fixedDates),
         filePayee: rec && stmt.payeeCol >= 0 ? rec[stmt.payeeCol] : undefined,
         fileRef: rec && stmt.refCol >= 0 ? rec[stmt.refCol] : '',
+        clientQuery: rec && stmt.clientQueries ? stmt.clientQueries[n - 1] : null,
       }));
       added++;
     });
@@ -5165,6 +5464,15 @@ async function processUnifiedQueue() {
           const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, sa.stmt);
           item.addedCount = result.added;
           item.warning = [sa.note, result.warning].filter(Boolean).join(' ') || null;
+          item.retry = result.retry || null;
+          if (result.added) setExportType('bank');
+        } else if (looksLikeMonthlyReport(sheet.sheets)) {
+          // The client's own book kept as a report per month, a row per day.
+          const mr = buildMonthlyReportStatement(sheet.sheets, document.getElementById('customQuarterDate')?.value || '', item.file.name);
+          const result = await parseBankStatementCsvFile(item.file, (msg) => { statusEl.textContent = msg; }, mr.stmt);
+          item.addedCount = result.added;
+          if (result.added) addFileClientQueries(item.file.name, mr.stmt.fileQueries);
+          item.warning = [mr.note, result.warning].filter(Boolean).join(' ') || null;
           item.retry = result.retry || null;
           if (result.added) setExportType('bank');
         } else if (looksLikeStatementSheet(sheet.rows, sheet.sheetNames)) {
@@ -5404,6 +5712,8 @@ function addRow(data) {
     // parseSalesInvoicesText): exported only in the Sales Invoices CSV.
     kind: d.kind || '',
     invoiceKey: d.invoiceKey || '',
+    // Questions for the client about this line, worded for an email.
+    clientQuery: Array.isArray(d.clientQuery) ? d.clientQuery.filter(Boolean) : [],
     saleNet: d.saleNet, saleTax: d.saleTax, saleRate: d.saleRate, saleGross: d.gross,
     _selected: false,
   });
@@ -5557,6 +5867,7 @@ function mergeSelectedRows() {
     home: false,
     direction: anyBank && signedTotal > 0 ? 'in' : 'out',
     fromBank: anyBank,
+    clientQuery: [...new Set(selected.flatMap(r => r.clientQuery || []))],
   };
 
   // Remove the originals first so the merged row lands cleanly at the end
@@ -6076,6 +6387,7 @@ function updateUI() {
   const topCount = document.getElementById('rowCountTop');
   if (topCount) topCount.textContent = rows.length ? countText : '';
   updateAddMoreButtons();
+  renderClientQueries();
 }
 
 function updateSummary() {
@@ -6252,8 +6564,71 @@ window.addEventListener('beforeunload', e => {
   if (rows.length || salesInvoices.length) { e.preventDefault(); e.returnValue = ''; }
 });
 
+
+// ── THINGS IN THE CLIENT'S SHEET TO CHECK ───────────────────────────────────
+// Questions about the client's own records (a sum that doesn't add up, a
+// cost with no amount, a month whose total doesn't match its lines), worded
+// so they can be pasted straight into an email to the client. Each row
+// carries its own questions (row.clientQuery), so deleting or merging rows
+// keeps the list in step; questions about a whole file (e.g. a month's
+// total) are kept here until the rows are cleared.
+let fileClientQueries = [];   // [{ file, text }]
+let clientQueriesEdited = false;
+
+function addFileClientQueries(fileName, list) {
+  (list || []).forEach(text => {
+    if (!fileClientQueries.some(q => q.file === fileName && q.text === text)) fileClientQueries.push({ file: fileName, text });
+  });
+  renderClientQueries();
+}
+
+function clientQueryDate(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${+m[3]} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m[2] - 1]} ${m[1]}` : '';
+}
+
+function buildClientQueriesText() {
+  const asked = rows.filter(r => r.clientQuery && r.clientQuery.length);
+  if (!asked.length && !fileClientQueries.length) return '';
+  const files = new Set(fileClientQueries.map(q => q.file));
+  const lines = fileClientQueries.map(q => `• ${q.text}${files.size > 1 ? ` (${q.file})` : ''}`);
+  asked.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).forEach(r => {
+    const what = String(r.desc || r.supplier || 'This item').replace(/\s+/g, ' ').trim();
+    // A question about the date itself names the date the client typed.
+    const when = r.clientQuery.some(q => /which date/.test(q)) ? '' : clientQueryDate(r.date);
+    const money = r.gross !== '' && !isNaN(Number(r.gross)) ? ` (${clientMoney(Number(r.gross))})` : '';
+    lines.push(`• ${when ? when + ' — ' : ''}"${what}"${r.clientQuery.length > 1 || !/£/.test(r.clientQuery[0]) ? money : ''}: ${r.clientQuery.join('; ')}`);
+  });
+  return `While preparing your accounts we noticed a few things in your records that we'd like you to check:\n\n${lines.join('\n')}\n\nCould you let us know the correct figures? Thank you.`;
+}
+
+// Shows the box when there's anything to ask. Text you've edited is kept
+// (with a "Rebuild from rows" button) unless `force` is set.
+function renderClientQueries(force) {
+  const box = document.getElementById('clientQueriesBox');
+  const ta = document.getElementById('clientQueriesText');
+  if (!box || !ta) return;
+  const text = buildClientQueriesText();
+  if (force === true) clientQueriesEdited = false;
+  if (!clientQueriesEdited) ta.value = text;
+  const stale = clientQueriesEdited && ta.value !== text;
+  document.getElementById('cqEdited').style.display = stale ? '' : 'none';
+  document.getElementById('cqRebuildBtn').style.display = stale ? '' : 'none';
+  box.style.display = (text || (clientQueriesEdited && ta.value.trim())) ? 'block' : 'none';
+}
+
+async function copyClientQueries() {
+  const ta = document.getElementById('clientQueriesText');
+  const btn = document.getElementById('cqCopyBtn');
+  try { await navigator.clipboard.writeText(ta.value); }
+  catch { ta.select(); document.execCommand('copy'); }
+  btn.textContent = '✓ Copied';
+  setTimeout(() => { btn.textContent = '⧉ Copy for email'; }, 1500);
+}
+
 function clearAll() {
   rows = []; nextId = 0;
+  fileClientQueries = []; clientQueriesEdited = false;
   salesInvoices = [];
   renderSalesTable();
   document.getElementById('expBody').innerHTML = '';
