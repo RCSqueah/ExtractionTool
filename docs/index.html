@@ -1054,6 +1054,9 @@
     <button class="btn btn-primary" id="exportBtn" onclick="exportCSV()" disabled>
       ↓ Download Xero CSV
     </button>
+    <button class="btn" id="yeSendBtn" onclick="sendToYearEnd()" disabled title="Send the coded lines to the Year End Tool for this client's accounts and tax">
+      → Send to Year End Tool
+    </button>
     <span id="exportNote" style="font-size:12px;color:var(--text-faint);margin-left:4px"></span>
     <label id="bankDescBlankLabel" style="display:none;gap:6px;align-items:center;font-size:12px;color:var(--text-muted);margin-left:8px;cursor:pointer;" title="The Payee column still shows who it was; the bank's own wording stays in the table for reference">
       <input type="checkbox" id="bankDescBlankBox" onchange="onBankDescBlankChange(this.checked)" disabled> Leave Description blank (Payee only) — saved per client
@@ -6602,6 +6605,8 @@ function refreshExportBtn() {
     if (sales.length) note += `${note ? '. ' : ''}Sales invoice lines (blue) go in the Sales Invoices CSV.`;
   }
   document.getElementById('exportNote').textContent = note;
+  const ye = document.getElementById('yeSendBtn');
+  if (ye) ye.disabled = !posted.length;
   refreshRefPlaceholders();
 }
 
@@ -7033,6 +7038,7 @@ async function copyClientQueries() {
 
 function clearAll() {
   rows = []; nextId = 0;
+  yearEndBatch = null;
   fileClientQueries = []; clientQueriesEdited = false;
   rowInstructionPending = null; rowUndoStack = [];
   renderRowInstructionPreview();
@@ -7077,6 +7083,57 @@ function fmtDate(dateStr) {
   const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return `${m[3]}/${m[2]}/${m[1]}`;
   return dateStr;
+}
+
+// Year End Tool (on the same site): sends this job's coded lines as a Bank
+// Statement CSV, with any sales invoices as money-in lines, so the Year End
+// Tool can build the client's accounts from them. Opened inside the Year End
+// Tool, the lines go straight across; opened on its own, they wait in this
+// browser's storage until the Year End Tool picks them up.
+// Each job is one batch in the Year End Tool: sending the same job again
+// replaces it there, and a new job (e.g. receipts after the bank) adds another.
+let yearEndBatch = null;
+function sendToYearEnd() {
+  const client = document.getElementById('clientName').value.trim();
+  if (!yearEndBatch) yearEndBatch = new Date().toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const bank = buildBankCSVData();
+  const sales = rows.filter(r => r.kind === 'sale' && r.post === 'YES' && r.acc).map(r => {
+    const { net } = saleLineAmounts(r);
+    return [fmtDate(r.date), Number(net).toFixed(2), csvEsc(r.supplier), csvEsc(r.desc), csvEsc(r.ref || ''), (r.acc || '').split(' - ')[0], csvEsc(r.vat)].join(',');
+  });
+  const files = [];
+  const batch = `Extraction Tool ${yearEndBatch}`;
+  if (bank.count) files.push({ name: `${batch} - lines`, csv: bank.content, count: bank.count });
+  if (sales.length) files.push({ name: `${batch} - sales invoices`, csv: ['Date,Amount,Payee,Description,Reference,Account Code,Tax Rate', ...sales].join('\r\n'), count: sales.length });
+  if (!files.length) { setAlert('There are no lines marked to post yet.', 'warn'); return; }
+  const n = files.reduce((a, f) => a + f.count, 0);
+  const msg = { type: 'extraction-tool:year-end', client, batch, files, sentAt: new Date().toISOString() };
+  if (window.parent !== window) {
+    window.parent.postMessage(msg, location.origin);
+    setAlert(`✓ Sent ${n} line${n !== 1 ? 's' : ''} for ${client || 'this client'} to the Year End Tool.`, 'success');
+    return;
+  }
+  try {
+    const inbox = JSON.parse(localStorage.getItem('yearEnd:inbox') || '[]').filter(m => !((m.client || '') === client && m.batch === batch));
+    inbox.push(msg);
+    localStorage.setItem('yearEnd:inbox', JSON.stringify(inbox));
+    setAlert(`✓ ${n} line${n !== 1 ? 's' : ''} for ${client || 'this client'} are waiting for the Year End Tool. Open the client there and go to Documents.`, 'success');
+  } catch (e) {
+    setAlert('Could not save the lines for the Year End Tool: ' + e.message, 'warn');
+  }
+}
+
+// Opened from the Year End Tool with ?client=Name: start on that client.
+function pickClientFromLink() {
+  const wanted = new URLSearchParams(location.search).get('client');
+  if (!wanted || currentClientKey) return;
+  const match = clientList.find(c => c.toLowerCase() === wanted.trim().toLowerCase());
+  if (match) {
+    document.getElementById('clientName').value = match;
+    onClientSelectChange();
+  } else {
+    setAlert(`${wanted} isn't set up here yet. Choose "+ Add a new client…" to add them.`, 'info');
+  }
 }
 
 function exportCSV() {
@@ -7280,7 +7337,7 @@ function csvEsc(val) {
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 calcHome();
-loadClientList();
+loadClientList().then(pickClientFromLink);
 
 // Default period: the most recent tax year end (YE-5 April) that has passed.
 (() => {
