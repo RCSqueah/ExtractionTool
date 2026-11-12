@@ -7117,7 +7117,7 @@ function sendToYearEnd() {
     const inbox = JSON.parse(localStorage.getItem('yearEnd:inbox') || '[]').filter(m => !((m.client || '') === client && m.batch === batch));
     inbox.push(msg);
     localStorage.setItem('yearEnd:inbox', JSON.stringify(inbox));
-    setAlert(`✓ ${n} line${n !== 1 ? 's' : ''} for ${client || 'this client'} are waiting for the Year End Tool. Open the client there and go to Documents.`, 'success');
+    setAlert(`✓ ${n} line${n !== 1 ? 's' : ''} for ${client || 'this client'} are waiting for the Year End Tool, on the client's Client & import tab.`, 'success');
   } catch (e) {
     setAlert('Could not save the lines for the Year End Tool: ' + e.message, 'warn');
   }
